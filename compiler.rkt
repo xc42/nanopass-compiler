@@ -69,7 +69,71 @@
 
 ;; remove-complex-opera* : R1 -> R1
 (define (remove-complex-opera* p)
-  (error "TODO: code goes here (remove-complex-opera*)"))
+  (letrec ([is-atom?
+             (lambda (expr)
+               (match expr
+                      [(Int n) #t]
+                      [(Var v) #t]
+                      [other #f]))]
+           [rco-atom
+             (lambda (expr)
+               (let ([cur (gensym 'tmp)])
+                 (let ([rco-sub-recur
+                         (lambda (subexp)
+                           (if (is-atom? subexp)
+                               (values subexp '())
+                               (rco-atom subexp)))])
+                   (match expr
+                          [(Prim '- (list e)) 
+                           (let-values ([(tmpvar alist) (rco-sub-recur e)])
+                             (values cur (cons (cons cur (Prim '- (list tmpvar))) alist)))]
+                          [(Prim '+ (list e1 e2))
+                           (let-values ([(tmpvar1 alist1) (rco-sub-recur e1)]
+                                        [(tmpvar2 alist2) (rco-sub-recur e2)])
+                             (values cur (cons (cons cur (Prim '+ (list tmpvar1 tmpvar2))) (append alist1 alist2))))]
+                          [(Let var expr body)
+                           (values cur (list (cons cur (Let var (rco-expr expr) (rco-expr body)))))]
+                          [other (values cur (list (cons cur expr)))]))))]
+
+                             
+           [rco-expr
+             (lambda (expr)
+               (letrec ([build-acc
+                          (lambda (start alist)
+                            (let ([val-exp (cdr (assoc start alist))])
+                              (letrec ([build-acc-recur
+                                         (lambda (body)
+                                           (let ([build-Let
+                                                   (lambda (tmpvar expr)
+                                                     (if (symbol? tmpvar)
+                                                         (build-acc-recur (Let tmpvar (cdr (assoc tmpvar alist)) expr))
+                                                         expr))])
+
+                                             (match body
+                                                    [(Int n) body]
+                                                    [(Var n) body]
+                                                    [(Prim '- (list tmpvar)) (build-Let tmpvar)]
+                                                    [(Prim '+ (list tmpvar1 tmpvar2)) 
+                                                     (build-Let tmpvar2 (build-Let tmpvar1 body))]
+                                                    [(Let v e body)
+                                                     (Let v (build-acc-recur e) (build-acc-recur body))])))])
+                                (build-acc-recur val-exp))))])
+
+               (match expr
+                      [(Int n) expr]
+                      [(Var v) expr]
+                      [(Prim '- e1)
+                       (let-values ([(cur alist) (rco-atom expr)])
+                         (build-acc  cur alist))]
+                      [(Prim '+ es)
+                       (let-values ([(cur alist) (rco-atom expr)])
+                         (build-acc  cur alist))]
+                      [(Let var e body) (Let var (rco-expr e) (rco-expr body))])))])
+    (match p
+           [(Program info e) (Program info (rco-expr e))])))
+                       
+
+
 
 ;; explicate-control : R1 -> C0
 (define (explicate-control p)
