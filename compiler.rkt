@@ -108,7 +108,7 @@
                           (if kv (build-from-branches (cdr kv) (Let var (cdr kv) expr0)) expr0))]
                        [(Prim '- `(,e)) (build-from-branches e expr0)]
                        [(Prim '+ `(,e1 ,e2)) (build-from-branches e1 (build-from-branches e2 expr0))]
-                       [(Let v e body) (build-from-branches v (build-from-branches body expr0))]))])
+                       [(Let v e body) (build-from-branches e (build-from-branches body expr0))]))])
                 build-from-branches))])
 
       (match expr
