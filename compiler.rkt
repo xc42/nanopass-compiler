@@ -69,75 +69,84 @@
 
 ;; remove-complex-opera* : R1 -> R1
 (define (remove-complex-opera* p)
-  (letrec ([is-atom?
-             (lambda (expr)
-               (match expr
-                      [(Int n) #t]
-                      [(Var v) #t]
-                      [other #f]))]
-           [rco-atom
-             (lambda (expr)
-               (let ([cur (gensym 'tmp)])
-                 (let ([rco-sub-recur
-                         (lambda (subexp)
-                           (if (is-atom? subexp)
-                               (values subexp '())
-                               (rco-atom subexp)))])
-                   (match expr
-                          [(Prim '- (list e)) 
-                           (let-values ([(tmpvar alist) (rco-sub-recur e)])
-                             (values cur (cons (cons cur (Prim '- (list tmpvar))) alist)))]
-                          [(Prim '+ (list e1 e2))
-                           (let-values ([(tmpvar1 alist1) (rco-sub-recur e1)]
-                                        [(tmpvar2 alist2) (rco-sub-recur e2)])
-                             (values cur (cons (cons cur (Prim '+ (list tmpvar1 tmpvar2))) (append alist1 alist2))))]
-                          [(Let var expr body)
-                           (values cur (list (cons cur (Let var (rco-expr expr) (rco-expr body)))))]
-                          [other (values cur (list (cons cur expr)))]))))]
+  (define (rco-atom expr)
+    (let ([expr-sym (gensym 'tmp)])
+      (match expr
+        [(Prim '+ `(,e1 ,e2)) 
+         (if (atm? e1)
+           (if (atm? e2)
+             (values expr-sym `((,expr-sym . ,expr)))
+             (values expr-sym 
+                     (let-values ([(e2-sym e2-alist) (rco-atom e2)])
+                       (cons (cons expr-sym  (Prim '+ `(,e1 ,(Var e2-sym)))) e2-alist))))
+           (if (atm? e2)
+             (values expr-sym 
+                     (let-values ([(e1-sym e1-alist) (rco-atom e1)])
+                       (cons (cons expr-sym  (Prim '+ `(,(Var e1-sym) ,e2))) e1-alist)))
+             (values expr-sym
+                     (let-values ([(e1-sym e1-alist) (rco-atom e1)]
+                                  [(e2-sym e2-alist) (rco-atom e2)])
+                       (cons (cons expr-sym (Prim '+ `(,(Var e1-sym) ,(Var e2-sym)))) (append e1-alist e2-alist))))))]
+        [(Prim '- `(,e))
+         (if (atm? e)
+           (values expr-sym `((,expr-sym . ,expr)))
+           (values expr-sym 
+                   (let-values ([(e-sym e-alist) (rco-atom e)])
+                     (cons (cons expr-sym  (Prim '- `(,(Var e-sym)))) e-alist))))]
+        [(Let v e body) (values expr-sym (list (cons expr-sym (Let v (rco-expr e) (rco-expr body)))))])))
 
-                             
-           [rco-expr
-             (lambda (expr)
-               (letrec ([build-acc
-                          (lambda (start alist)
-                            (let ([val-exp (cdr (assoc start alist))])
-                              (letrec ([build-acc-recur
-                                         (lambda (body)
-                                           (let ([build-Let
-                                                   (lambda (tmpvar expr)
-                                                     (if (symbol? tmpvar)
-                                                         (build-acc-recur (Let tmpvar (cdr (assoc tmpvar alist)) expr))
-                                                         expr))])
+  (define (rco-expr expr)
+    (let ([build 
+            (lambda (alist)
+              (letrec 
+                ([build-from-branches
+                   (lambda (tmp-expr expr0)
+                     (match tmp-expr
+                       [(Int n) expr0]
+                       [(Var var) 
+                        (let ([kv (assoc var alist)])
+                          (if kv (build-from-branches (cdr kv) (Let var (cdr kv) expr0)) expr0))]
+                       [(Prim '- `(,e)) (build-from-branches e expr0)]
+                       [(Prim '+ `(,e1 ,e2)) (build-from-branches e1 (build-from-branches e2 expr0))]
+                       [(Let v e body) (build-from-branches v (build-from-branches body expr0))]))])
+                build-from-branches))])
 
-                                             (match body
-                                                    [(Int n) body]
-                                                    [(Var n) body]
-                                                    [(Prim '- (list tmpvar)) (build-Let tmpvar)]
-                                                    [(Prim '+ (list tmpvar1 tmpvar2)) 
-                                                     (build-Let tmpvar2 (build-Let tmpvar1 body))]
-                                                    [(Let v e body)
-                                                     (Let v (build-acc-recur e) (build-acc-recur body))])))])
-                                (build-acc-recur val-exp))))])
+      (match expr
+        [(Int n) expr]
+        [(Var n) expr]
+        [_ (let-values ([(start-sym alist) (rco-atom expr)]) 
+             (let ([tmp-expr (cdr (assoc start-sym alist))])
+               (match tmp-expr
+                 [(Prim '+ _) ((build alist) tmp-expr tmp-expr)]
+                 [(Prim '- _) ((build alist) tmp-expr tmp-expr)]
+                 [_ tmp-expr])))])))
 
-               (match expr
-                      [(Int n) expr]
-                      [(Var v) expr]
-                      [(Prim '- e1)
-                       (let-values ([(cur alist) (rco-atom expr)])
-                         (build-acc  cur alist))]
-                      [(Prim '+ es)
-                       (let-values ([(cur alist) (rco-atom expr)])
-                         (build-acc  cur alist))]
-                      [(Let var e body) (Let var (rco-expr e) (rco-expr body))])))])
-    (match p
-           [(Program info e) (Program info (rco-expr e))])))
+  (match p
+    [(Program info e) (Program info (rco-expr e))]))
                        
 
 
 
 ;; explicate-control : R1 -> C0
 (define (explicate-control p)
-  (error "TODO: code goes here (explicate-control)"))
+  (letrec
+    ([explicate-assign
+       (lambda (var expr acc)
+         (match expr
+           [(Let v e body)
+            (explicate-assign v e (explicate-assign var body acc))]
+           [other (cons (Assign (Var var) expr) acc)]))]
+     [explicate-tail
+       (lambda (expr)
+         (match expr
+           [(Let var e body)
+            (foldr Seq (explicate-tail body) (explicate-assign var e '()))]
+           [other (Return expr)]))])
+  (match p
+    [(Program info e)
+     (CProgram info `((start . ,(explicate-tail e))))])))
+
+       
 
 ;; select-instructions : C0 -> pseudo-x86
 (define (select-instructions p)
