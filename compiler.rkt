@@ -150,7 +150,31 @@
 
 ;; select-instructions : C0 -> pseudo-x86
 (define (select-instructions p)
-  (error "TODO: code goes here (select-instructions)"))
+  (define (trans-C0-assign stmt)
+	(match-let ([(Assign dst expr) stmt])
+	   (match expr
+		 [(Int n) '(,(Instr 'movq (list (Imm n) dst)))]
+		 [(Var v) '(,(Instr 'movq (list (Var v) dst)))]
+		 [(Prim '- `(,e)) '(,(Instr 'negq (list e)))]
+		 [(Prim '+ `(,e1 ,e2))
+		  (cond
+			[(and (Int? e1) (Int? e2)) 
+			 (match-let ([(Int n1) e1] [(Int n2) e2]) '(,(Instr 'movq (list (Imm (+ n1 n2)) (Var v)))))] 
+			[(or (Int? e1) (Int? e2))
+			 (match-let ([(Int n) (if (Int? e1) e1 e2)] [(Var v) (if (Int? e2) e1 e2)] [(Var var) dst]) 
+			   (if (eq? v var) 
+				 '(,(Instr 'addq (list (Imm n) dst)))
+				 '(,(Instr 'movq (list (Imm n) dst)) ,(Inst 'addq (list (Var v) dst)))))]
+			[else 
+			  (match-let ([(Var v1) e1] [(Var v2) e2] [(Var var) dst])
+				(cond
+				  [(eq? v1 var) '(,(Instr 'addq (list e2 dst)))]
+				  [(eq? v2 var) '(,(Instr 'addq (list e1 dst)))]
+				  [else '(,(Instr 'movq (list e1 dst)) ,(Instr 'addq (list e2 dst)))]))])])))
+
+  (match p
+	[(CProgram info (list (label . stmts) ...))
+
 
 ;; assign-homes : pseudo-x86 -> pseudo-x86
 (define (assign-homes p)
