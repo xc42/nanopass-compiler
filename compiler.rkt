@@ -108,7 +108,7 @@
                           (if kv (build-from-branches (cdr kv) (Let var (cdr kv) expr0)) expr0))]
                        [(Prim '- `(,e)) (build-from-branches e expr0)]
                        [(Prim '+ `(,e1 ,e2)) (build-from-branches e1 (build-from-branches e2 expr0))]
-                       [(Let v e body) (build-from-branches v (build-from-branches body expr0))]))])
+                       [(Let v e body) (build-from-branches e (build-from-branches body expr0))]))])
                 build-from-branches))])
 
       (match expr
@@ -153,27 +153,56 @@
   (define (trans-C0-assign stmt)
 	(match-let ([(Assign dst expr) stmt])
 	   (match expr
-		 [(Int n) '(,(Instr 'movq (list (Imm n) dst)))]
-		 [(Var v) '(,(Instr 'movq (list (Var v) dst)))]
-		 [(Prim '- `(,e)) '(,(Instr 'negq (list e)))]
+		 [(Int n) `(,(Instr 'movq (list (Imm n) dst)))]
+		 [(Var v) `(,(Instr 'movq (list (Var v) dst)))]
+		 [(Prim '- `(,e)) 
+		  (if (Int? e)
+			(match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) dst))))
+			`(,(Instr 'movq (list e dst)) ,(Instr 'negq (list dst))))]
+		  
 		 [(Prim '+ `(,e1 ,e2))
 		  (cond
 			[(and (Int? e1) (Int? e2)) 
-			 (match-let ([(Int n1) e1] [(Int n2) e2]) '(,(Instr 'movq (list (Imm (+ n1 n2)) (Var v)))))] 
+			 (match-let ([(Int n1) e1] [(Int n2) e2]) `(,(Instr 'movq (list (Imm (+ n1 n2)) dst))))] 
 			[(or (Int? e1) (Int? e2))
 			 (match-let ([(Int n) (if (Int? e1) e1 e2)] [(Var v) (if (Int? e2) e1 e2)] [(Var var) dst]) 
 			   (if (eq? v var) 
-				 '(,(Instr 'addq (list (Imm n) dst)))
-				 '(,(Instr 'movq (list (Imm n) dst)) ,(Inst 'addq (list (Var v) dst)))))]
+				 `(,(Instr 'addq (list (Imm n) dst)))
+				 `(,(Instr 'movq (list (Imm n) dst)) ,(Instr 'addq (list (Var v) dst)))))]
 			[else 
 			  (match-let ([(Var v1) e1] [(Var v2) e2] [(Var var) dst])
 				(cond
-				  [(eq? v1 var) '(,(Instr 'addq (list e2 dst)))]
-				  [(eq? v2 var) '(,(Instr 'addq (list e1 dst)))]
-				  [else '(,(Instr 'movq (list e1 dst)) ,(Instr 'addq (list e2 dst)))]))])])))
-
+				  [(eq? v1 var) `(,(Instr 'addq (list e2 dst)))]
+				  [(eq? v2 var) `(,(Instr 'addq (list e1 dst)))]
+				  [else `(,(Instr 'movq (list e1 dst)) ,(Instr 'addq (list e2 dst)))]))])])))
+  
+  (define (trans-stmts stmts)
+	(match stmts
+	  [(Seq s1 tail) (append (trans-C0-assign s1) (trans-stmts tail))]
+	  [(Return expr) (match expr
+					   [(Prim '+ `(,e1 ,e2)) 
+						(cond
+						  [(and (Int? e1) (Int? e2)) 
+						   (match-let ([(Int n1) e1] [(Int n2) e2]) `(,(Instr 'movq (list (Imm (+ n1 n2)) (Reg 'rax)))))]
+						  [(Int? e1) (match-let ([(Int n1) e1]) 
+									   `(,(Instr 'movq (list (Imm n1) (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax)))))]
+						  [(Int? e2) (match-let ([(Int n2) e2]) 
+									   `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list (Imm n2) (Reg 'rax)))))]
+						  [else `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax))))])]
+					   [(Prim '- `(,e))
+						(if (Int? e)
+						  (match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) (Reg 'rax)))))
+						  `(,(Instr 'movq (list e (Reg 'rax))) ,(Instr 'negq (list (Reg 'rax)))))]
+					   [(Int n) `(,(Instr 'movq (list (Imm n) (Reg 'rax))))]
+					   [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
   (match p
-	[(CProgram info (list (label . stmts) ...))
+	[(CProgram info (list lab-sts ...))
+	 (X86Program info
+				 (map 
+				   (lambda (ls)
+					 (let ([label (car ls)] [stmts (cdr ls)])
+					   (cons label (Block info (trans-stmts stmts)))))
+				   lab-sts))]))
 
 
 ;; assign-homes : pseudo-x86 -> pseudo-x86
