@@ -3,6 +3,7 @@
 (require racket/fixnum)
 (require "interp-Rint.rkt")
 (require "utilities.rkt")
+(require "type-check-Cvar.rkt")
 (provide (all-defined-out))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -194,7 +195,7 @@
 						  `(,(Instr 'movq (list e (Reg 'rax))) ,(Instr 'negq (list (Reg 'rax)))))]
 					   [(Int n) `(,(Instr 'movq (list (Imm n) (Reg 'rax))))]
 					   [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
-  (match p
+  (match (type-check-Cvar p)
 	[(CProgram info (list lab-sts ...))
 	 (X86Program info
 				 (map 
@@ -206,7 +207,41 @@
 
 ;; assign-homes : pseudo-x86 -> pseudo-x86
 (define (assign-homes p)
-  (error "TODO: code goes here (assign-homes)"))
+  (define (sizeof type)
+	(match type
+	  ['Integer 8]))
+
+  (define (alloc-stack info)
+	(letrec 
+	  ([recur 
+		 (lambda (info cur acc)
+		   (if (null? info)
+			 acc
+			 (let ([sym (caar info)] [size (sizeof (cdar info))])
+			   (recur (cdr info) (- cur size) (cons (cons sym (- cur size)) acc)))))])
+	  (recur info 0 '())))
+
+
+  (match p
+	[(X86Program info `(,lab-blks ...))
+	 (let* ([vars-loc 
+			  (alloc-stack (let ([var-types (assoc 'locals-types info)]) (if var-types (cdr var-types) '())))]
+			[subst-var 
+			  (lambda (operand) 
+				(if (Var? operand)
+				  (match-let ([(Var var) operand]) (Deref 'rbp (cdr (assoc var vars-loc))))
+				  operand))]
+			[subst-instr
+			  (lambda (instr)
+				(match-let ([(Instr op args) instr]) (Instr op (map subst-var args))))])
+	   (if (null? vars-loc)
+		 p
+		 (X86Program info
+					 (map (lambda (lab-blk)
+							(cons (car lab-blk) 
+								  (match-let ([(Block info stmts) (cdr lab-blk)])
+									(Block info (map subst-instr stmts)))))
+						  lab-blks))))]))
 
 ;; patch-instructions : psuedo-x86 -> x86
 (define (patch-instructions p)
