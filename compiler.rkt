@@ -267,4 +267,31 @@
 
 ;; print-x86 : x86 -> string
 (define (print-x86 p)
-  (error "TODO: code goes here (print-x86)"))
+  (define (print-instr instr)
+	(let ([print-item
+			(lambda (item)
+			  (match item
+				[(Reg r) (~a "%" r)]
+				[(Imm n) (~a "$" n)]
+				[(Deref r o) (format "~a(%~a)" o r)]))])
+	(match instr
+	  [(Instr op args) (format "~a ~a" op (string-join (map print-item args) " "))])))
+
+  (match-let* ([(X86Program info lab-blks) p]
+			   [(Block info instrs) (cdr (assoc 'start lab-blks))]
+			   [stack-size (* (length (assoc 'locals-types info)) 8)])
+	(string-append
+	  "start:\n\t"
+	  (string-join (map print-instr instrs) "\n\t")
+	  "\n\tjump conclusion\n\n\t"
+	  ".globl main\n"
+	  "main:\n\t"
+	  "push %rbp\n\t"
+	  "movq %rsp %rbp\n\t"
+	  (format "subq $~a %rsp\n\t" stack-size)
+	  "jump start\n\n"
+	  "conclusion:\n\t"
+	  (format "addq $~a %rsp\n\t" stack-size)
+	  "popq %rbx\n\t"
+	  "ret")))
+
