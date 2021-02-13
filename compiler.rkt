@@ -245,7 +245,25 @@
 
 ;; patch-instructions : psuedo-x86 -> x86
 (define (patch-instructions p)
-  (error "TODO: code goes here (patch-instructions)"))
+  (let ([patch-instr
+		  (lambda (instr)
+			(match instr
+			  [(Instr 'movq (list (Deref reg1 offset1) (Deref reg2 offset2)))
+			   `(,(Instr 'movq (list (Deref reg1 offset1) (Reg 'rax)))
+				  ,(Instr 'movq (list (Reg 'rax) (Deref reg2 offset2))))]
+			  [else `(,instr)]))])
+	(match p
+	  [(X86Program info `(,lab-blks ...))
+	   (X86Program info (map 
+						  (lambda (lab-blk)
+							(cons (car lab-blk)
+								  (match-let ([(Block info stmts) (cdr lab-blk)])
+									(Block info 
+										   (foldr (lambda (cur acc) (append (patch-instr cur) acc)) 
+												  '() 
+												  stmts)))))
+						  lab-blks))])))
+
 
 ;; print-x86 : x86 -> string
 (define (print-x86 p)
