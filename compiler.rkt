@@ -295,3 +295,38 @@
 	  "popq %rbx\n\t"
 	  "ret")))
 
+(define (uncover-live p)
+  (define (bottom-up-check instr acc-set)
+	(let ([last-set (if (null? acc-set) (set) (car acc-set))])
+	  (match instr
+		[(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
+		 (cons (if (Imm? arg1) 
+				 (set-add last-set arg2) 
+				 (set-union (set arg1 arg2)))
+			   acc-set)]
+		[(Instr 'movq `(,arg1 ,arg2)) 
+		 (cons (if (Imm? arg1) 
+				 (set-remove last-set arg2)
+				 (set-add (set-remove last-set arg2) arg1)) 
+			   acc-set)]
+		[(Instr 'negq `(,e)) (cons (set-add last-set e) acc-set)]
+		[(Instr 'jmp `(,label)) acc-set] ;;TODO
+		[(Pushq arg) (cons (set-add last-set arg) acc-set)]
+		[(Popq arg) (cons (set-remove last-set arg) acc-set)]
+		[(Callq label _) acc-set] ;;TODO
+		[(Retq) acc-set] ;;TODO
+		)))
+								
+								
+
+  (match-let* ([(X86Program info lab-blks) p])
+	(X86Program info
+				(map 
+				  (lambda (lab-blk)
+					(cons (car lab-blk)
+						  (match-let ([(Block info stmts) (cdr lab-blk)])
+							(Block (cons 
+									 (cons 'live-after (foldr bottom-up-check '() stmts))
+									 info) 
+								   stmts)))))
+				lab-blks))
