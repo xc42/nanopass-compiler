@@ -60,6 +60,7 @@
       [(Let x e body)
        (let ([x* (gensym x)])
          (Let x* ((uniquify-exp env) e) ((uniquify-exp (extend-env env x x*)) body)))]
+	  [(Prim 'read '()) e]
       [(Prim op es)
        (Prim op (for/list ([e es]) ((uniquify-exp env) e)))])))
 
@@ -115,6 +116,7 @@
       (match expr
         [(Int n) expr]
         [(Var n) expr]
+		[(Prim 'read '()) expr]
         [_ (let-values ([(start-sym alist) (rco-atom expr)]) 
              (let ([tmp-expr (cdr (assoc start-sym alist))])
                (match tmp-expr
@@ -155,6 +157,7 @@
 	   (match expr
 		 [(Int n) `(,(Instr 'movq (list (Imm n) dst)))]
 		 [(Var v) `(,(Instr 'movq (list (Var v) dst)))]
+		 [(Prim 'read '()) `(,(Callq 'read_int 0) ,(Instr 'movq (list (Reg 'rax) dst)))]
 		 [(Prim '- `(,e)) 
 		  (if (Int? e)
 			(match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) dst))))
@@ -233,7 +236,10 @@
 				  operand))]
 			[subst-instr
 			  (lambda (instr)
-				(match-let ([(Instr op args) instr]) (Instr op (map subst-var args))))])
+				(match instr
+					   [(Instr op args)  (Instr op (map subst-var args))]
+					   [_ instr]))])
+					
 	   (if (null? vars-loc)
 		 p
 		 (X86Program info
@@ -275,7 +281,8 @@
 				[(Imm n) (~a "$" n)]
 				[(Deref r o) (format "~a(%~a)" o r)]))])
 	(match instr
-	  [(Instr op args) (format "~a ~a" op (string-join (map print-item args) " "))])))
+	  [(Instr op args) (format "~a ~a" op (string-join (map print-item args) " "))]
+	  [(Callq func _) (~a "callq" func)])))
 
   (match-let* ([(X86Program info lab-blks) p]
 			   [(Block info instrs) (cdr (assoc 'start lab-blks))]
@@ -311,14 +318,9 @@
 			   acc-set)]
 		[(Instr 'negq `(,e)) (cons (set-add last-set e) acc-set)]
 		[(Instr 'jmp `(,label)) acc-set] ;;TODO
-		[(Pushq arg) (cons (set-add last-set arg) acc-set)]
-		[(Popq arg) (cons (set-remove last-set arg) acc-set)]
 		[(Callq label _) acc-set] ;;TODO
 		[(Retq) acc-set] ;;TODO
 		)))
-								
-								
-
   (match-let* ([(X86Program info lab-blks) p])
 	(X86Program info
 				(map 
@@ -329,4 +331,4 @@
 									 (cons 'live-after (foldr bottom-up-check '() stmts))
 									 info) 
 								   stmts)))))
-				lab-blks))
+				lab-blks)))
