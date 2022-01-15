@@ -4,6 +4,7 @@
 (require "interp-Rint.rkt")
 (require "utilities.rkt")
 (require "type-check-Cvar.rkt")
+(require graph)
 (provide (all-defined-out))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -302,33 +303,76 @@
 	  "popq %rbx\n\t"
 	  "ret")))
 
+(define (get-instr-RW-set instr)
+  (lambda (instr)
+	(match instr
+		   [(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
+			(if (Imm? arg1) 
+				(cons (set arg2) (set)) 
+				(cons (set arg1 arg2) (set)))]
+		   [(Instr 'movq `(,arg1 ,arg2)) 
+			(if (Imm? arg1) 
+				(cons (set) (set arg2))
+				(cons (set arg1) (set arg2)))]
+		   [(Instr 'negq `(,e)) (cons (set e) (set))]
+		   [(Instr 'jmp `(,label)) (cons (set) (set))] ;;TODO
+		   [(Callq label _) (cons (set) (apply set (map Reg '(rax rcx rdx rsi rdi r8 r9 r10 r11))))] ;;TODO
+		   [(Retq) (cons (set) (set))] ;;TODO
+		   )))
+
 (define (uncover-live p)
-  (define (bottom-up-check instr acc-set)
-	(let ([last-set (if (null? acc-set) (set) (car acc-set))])
-	  (match instr
-		[(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
-		 (cons (if (Imm? arg1) 
-				 (set-add last-set arg2) 
-				 (set-union (set arg1 arg2)))
-			   acc-set)]
-		[(Instr 'movq `(,arg1 ,arg2)) 
-		 (cons (if (Imm? arg1) 
-				 (set-remove last-set arg2)
-				 (set-add (set-remove last-set arg2) arg1)) 
-			   acc-set)]
-		[(Instr 'negq `(,e)) (cons (set-add last-set e) acc-set)]
-		[(Instr 'jmp `(,label)) acc-set] ;;TODO
-		[(Callq label _) acc-set] ;;TODO
-		[(Retq) acc-set] ;;TODO
-		)))
-  (match-let* ([(X86Program info lab-blks) p])
-	(X86Program info
-				(map 
-				  (lambda (lab-blk)
-					(cons (car lab-blk)
-						  (match-let ([(Block info stmts) (cdr lab-blk)])
-							(Block (cons 
-									 (cons 'live-after (foldr bottom-up-check '() stmts))
-									 info) 
-								   stmts)))))
-				lab-blks)))
+  (match-letrec ([(X86Program info lab-blks) p]
+			   [lab-live-map (make-hash '())] ;;memorize
+			   [uncover-one-instr
+				 (lambda (instr live-after)
+				   (match instr
+						  [(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
+						   (if (Imm? arg1) 
+							   (set-add live-after arg2) 
+							   (set-union live-after (set arg1 arg2)))]
+						  [(Instr 'movq `(,arg1 ,arg2)) 
+						   (if (Imm? arg1) 
+							   (set-remove live-after arg2)
+							   (set-add (set-remove live-after arg2) arg1))]
+						  [(Instr 'negq `(,e)) (set-add live-after e)]
+						  [(Instr 'jmp `(,label)) (car (uncover-lab-blk (assoc label lab-blks)))]
+						  [(Callq label _) (set-remove live-after (apply set (map Reg '(rax rcx rdx rsi rdi r8 r9 r10 r11))))] ;;TODO
+						  [(Retq) live-after] ;;TODO
+						  ))]
+			  [uncover-block	(lambda (stmts) 
+								  (foldr (lambda (instr acc-live-set) (cons (uncover-one-instr instr (car acc-live-set)) acc-live-set))
+										 `(,(set))
+										 stmts))]
+			  [uncover-lab-blk (lambda (lab-blk)
+								 (let ([lab (car lab-blk)] [blk (cdr lab-blk)])
+								   (if (hash-has-key? lab-live-map lab)
+									   (hash-ref lab-live-map lab)
+									   (match-let* ([(Block info stmts) blk]
+												   [live-set (uncover-block stmts)])
+												   (begin 
+													 (hash-set! lab-live-map lab live-set) ;;remember this label's live set
+													 live-set)))))])
+			  (X86Program info 
+						  (map 
+							(lambda (lab-blk) 
+							  (match-let ([(cons label (Block info stmts)) lab-blk])
+										 (cons label (Block (cons 'live-set (uncover-lab-blk lab-blk)) stmts))))
+							lab-blks))))
+
+(define (build-interference p)
+  (let ([graph-from 
+		  (lambda (live-sets instrs)
+			(foldl
+			  (lambda (instr-lives g)
+				(match-let* 
+				  ([(cons instr lives) instr-lives]
+				   [(cons rs ws) (get-instr-RW-set instr)])
+				  1; //TODO
+				  ))
+			  (undirected-graph '())
+			  (map cons instrs (cdr live-sets))))])
+  (match-let* ([(X86Program info lab-blks) p]
+			  [(cons 'start (Block binfo stmts)) (assoc 'start lab-blks)]
+			  [(cons 'live-set live-sets) (assoc 'live-set binfo)])
+			  
+			  (X86Program (cons (cons 'conflicts (graph-from live-sets stmts) info)) lab-blks))))
