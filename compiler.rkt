@@ -172,7 +172,7 @@
 			 (match-let ([(Int n) (if (Int? e1) e1 e2)] [(Var v) (if (Int? e2) e1 e2)] [(Var var) dst]) 
 			   (if (eq? v var) 
 				 `(,(Instr 'addq (list (Imm n) dst)))
-				 `(,(Instr 'movq (list (Imm n) dst)) ,(Instr 'addq (list (Var v) dst)))))]
+				 `(,(Instr 'movq (list (Var v) dst)) ,(Instr 'addq (list (Imm n) dst)))))]
 			[else 
 			  (match-let ([(Var v1) e1] [(Var v2) e2] [(Var var) dst])
 				(cond
@@ -356,7 +356,7 @@
 						  (map 
 							(lambda (lab-blk) 
 							  (match-let ([(cons label (Block info stmts)) lab-blk])
-										 (cons label (Block (cons 'live-set (uncover-lab-blk lab-blk)) stmts))))
+										 (cons label (Block (cons (cons 'live-set (uncover-lab-blk lab-blk)) info) stmts))))
 							lab-blks))))
 
 (define (build-interference p)
@@ -364,15 +364,52 @@
 		  (lambda (live-sets instrs)
 			(foldl
 			  (lambda (instr-lives g)
-				(match-let* 
-				  ([(cons instr lives) instr-lives]
-				   [(cons rs ws) (get-instr-RW-set instr)])
-				  1; //TODO
-				  ))
+				(let ([instr (car instr-lives)]
+					  [lives (cdr instr-lives)])
+				  (match instr
+						 [(Instr 'movq `(,s ,d)) 
+						  (begin (set-for-each lives (lambda (x) (unless (or (equal? x s) (equal? x d)) (add-edge! g x d))))
+						  g)]
+						 [(Instr (or 'addq 'subq) `(,s ,d))
+						  (begin (set-for-each lives (lambda (x) (unless (equal? x d) (add-edge! g x d))))
+						  g)]
+						 [(Instr 'negq `(,d))
+						  (begin (set-for-each lives (lambda (x) (unless (equal? x d) (add-edge! g x d))))
+						  g)]
+						 [(Instr 'jmp `(,label)) g] ;TODO
+						 [(Call label _) g]; TODO
+						 )))
 			  (undirected-graph '())
 			  (map cons instrs (cdr live-sets))))])
   (match-let* ([(X86Program info lab-blks) p]
-			  [(cons 'start (Block binfo stmts)) (assoc 'start lab-blks)]
-			  [(cons 'live-set live-sets) (assoc 'live-set binfo)])
+			  [`(start . ,(Block binfo stmts)) (assoc 'start lab-blks)]
+			  [`(live-set . ,live-sets) (assoc 'live-set binfo)])
 			  
-			  (X86Program (cons (cons 'conflicts (graph-from live-sets stmts) info)) lab-blks))))
+			  (X86Program (cons (cons 'conflicts (graph-from live-sets stmts)) info) lab-blks))))
+
+(define (my-graph2dot graph file-name)
+  (call-with-output-file
+	file-name #:exists 'replace
+	(lambda (out-file)
+	  (write-string "strict graph {" out-file) (newline out-file)
+	  (for ([v (in-vertices graph)])
+		   (write-string (format "~a;\n" v) out-file))
+	  (for ([u (in-vertices graph)])
+		   (for ([v (in-neighbors graph u)])
+				(write-string (format "~a -- ~a;\n" u v) out-file)))
+	  (write-string "}" out-file)
+	  (newline out-file))))
+
+(require "priority_queue.rkt")
+(define (color-graph G)
+  (let* ([color-map (for/hash ([v (in-vertices G)]) (values v (set)))]
+		 [get-satur
+		   (lambda (v)
+			 (foldl set-union (set) (map (lambda (u) (hash-ref color-map u)) (for/list ([x (in-neighbors G v)]) x))))]
+		 [cmp
+		   (lambda (v1 v2)
+			 (< (set-count (get-satur v1)) (set-count (get-satur v2))))]
+		 [Q (make-pqueue cmp)]
+		 [v-h (for/hash ([v (in-vertices G)]) (values v (pqueue-push! Q v)))])
+  42;TODO
+  ))
