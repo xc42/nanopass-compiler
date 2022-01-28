@@ -400,16 +400,31 @@
 	  (write-string "}" out-file)
 	  (newline out-file))))
 
+(define (my-get-X86-graph p)
+  (cdr (assoc 'conflicts (X86Program-info p))))
+
 (require "priority_queue.rkt")
 (define (color-graph G)
-  (let* ([color-map (for/hash ([v (in-vertices G)]) (values v (set)))]
+  (let* ([color-map (make-hash)]
 		 [get-satur
 		   (lambda (v)
-			 (foldl set-union (set) (map (lambda (u) (hash-ref color-map u)) (for/list ([x (in-neighbors G v)]) x))))]
+			 (for/set ([u (in-neighbors G v)] #:when (hash-has-key? color-map u))
+					  (hash-ref color-map u)))]
 		 [cmp
 		   (lambda (v1 v2)
-			 (< (set-count (get-satur v1)) (set-count (get-satur v2))))]
+			 (> (set-count (get-satur v1)) (set-count (get-satur v2))))]
 		 [Q (make-pqueue cmp)]
 		 [v-h (for/hash ([v (in-vertices G)]) (values v (pqueue-push! Q v)))])
-  42;TODO
-  ))
+
+	(let colorize ()
+	  (if (= 0 (pqueue-count Q))
+		  color-map
+		  (let* ([v (pqueue-pop! Q)]
+				 [satur (get-satur v)]
+				 [reg-k (let find-s-reg ([k 0]) (if (set-member? satur k) 
+													(find-s-reg (+ k 1)) 
+													k))])
+			(hash-set! color-map v reg-k) 
+			(pqueue-decrease-key! Q (hash-ref v-h v))
+			(colorize))))))
+
