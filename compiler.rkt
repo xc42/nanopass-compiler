@@ -255,10 +255,14 @@
   (let ([patch-instr
 		  (lambda (instr)
 			(match instr
-			  [(Instr 'movq (list (Deref reg1 offset1) (Deref reg2 offset2)))
-			   `(,(Instr 'movq (list (Deref reg1 offset1) (Reg 'rax)))
-				  ,(Instr 'movq (list (Reg 'rax) (Deref reg2 offset2))))]
-			  [else `(,instr)]))])
+				   [(Instr 'movq `(,arg ,arg)) '()] ;;del
+				   [(Instr 'movq (list (Deref reg1 offset1) (Deref reg2 offset2)))
+					`(,(Instr 'movq (list (Deref reg1 offset1) (Reg 'rax)))
+					   ,(Instr 'movq (list (Reg 'rax) (Deref reg2 offset2))))]
+				   [(Instr 'addq `(,(Deref r1 offset1) ,(Deref r2 offset2)))
+					`(,(Instr 'movq `(,(Deref r1 offset1) ,(Reg 'rax)))
+					  ,(Instr 'addq `(,(Reg 'rax) ,(Deref r2 offset2))))]
+				   [else `(,instr)]))])
 	(match p
 	  [(X86Program info `(,lab-blks ...))
 	   (X86Program info (map 
@@ -272,36 +276,6 @@
 						  lab-blks))])))
 
 
-;; print-x86 : x86 -> string
-(define (print-x86 p)
-  (define (print-instr instr)
-	(let ([print-item
-			(lambda (item)
-			  (match item
-				[(Reg r) (~a "%" r)]
-				[(Imm n) (~a "$" n)]
-				[(Deref r o) (format "~a(%~a)" o r)]))])
-	(match instr
-	  [(Instr op args) (format "~a ~a" op (string-join (map print-item args) " "))]
-	  [(Callq func _) (~a "callq" func)])))
-
-  (match-let* ([(X86Program info lab-blks) p]
-			   [(Block info instrs) (cdr (assoc 'start lab-blks))]
-			   [stack-size (* (length (assoc 'locals-types info)) 8)])
-	(string-append
-	  "start:\n\t"
-	  (string-join (map print-instr instrs) "\n\t")
-	  "\n\tjump conclusion\n\n\t"
-	  ".globl main\n"
-	  "main:\n\t"
-	  "push %rbp\n\t"
-	  "movq %rsp %rbp\n\t"
-	  (format "subq $~a %rsp\n\t" stack-size)
-	  "jump start\n\n"
-	  "conclusion:\n\t"
-	  (format "addq $~a %rsp\n\t" stack-size)
-	  "popq %rbx\n\t"
-	  "ret")))
 
 (define (get-instr-RW-set instr)
   (lambda (instr)
@@ -405,7 +379,7 @@
 
 (require "priority_queue.rkt")
 (define (color-graph G)
-  (let* ([color-map (make-hash)]
+  (let* ([color-map (make-hash (list (cons (Reg 'rax)  -1) (cons (Reg 'rsp)  -2)))]
 		 [get-satur
 		   (lambda (v)
 			 (for/set ([u (in-neighbors G v)] #:when (hash-has-key? color-map u))
@@ -414,7 +388,8 @@
 		   (lambda (v1 v2)
 			 (> (set-count (get-satur v1)) (set-count (get-satur v2))))]
 		 [Q (make-pqueue cmp)]
-		 [v-h (for/hash ([v (in-vertices G)]) (values v (pqueue-push! Q v)))])
+		 [v-h (for/hash ([v (in-vertices G)] #:unless (hash-has-key? color-map v))
+						(values v (pqueue-push! Q v)))])
 
 	(let colorize ()
 	  (if (= 0 (pqueue-count Q))
@@ -428,3 +403,78 @@
 			(pqueue-decrease-key! Q (hash-ref v-h v))
 			(colorize))))))
 
+(define (allocate-register P [limit-reg 1])
+  (let* ([general-regs (apply vector (map Reg '(rbx rcx rdx rsi rdi r8 r9 r10 r11 r12 r13 r14 r15)))]
+		 [callee-saved (apply set (map Reg '(rsp rbp rbx r12 r13 r14 r15)))])
+	(match-let* ([(X86Program info lab-blk) P]
+				 [color-map (color-graph (cdr (assoc 'conflicts info)))]
+				 [(Block binfo stmts) (cdr (assoc 'start lab-blk))]
+				 [var-map
+				   (let scan-var ([loc-ts (cdr (assoc 'locals-types info))] [spilled 1])
+					 (if (null? loc-ts)
+						 '()
+						 (let ([var (Var (caar loc-ts))])
+						   (if (hash-has-key? color-map var)
+							   (let ([reg-idx (hash-ref color-map var)])
+								 (if (or (< reg-idx 0) (>= reg-idx limit-reg))
+									 (cons (cons var (Deref 'rbp (* -8 spilled))) (scan-var (cdr loc-ts) (+ spilled 1)))
+									 (cons (cons var (vector-ref general-regs reg-idx)) (scan-var (cdr loc-ts) spilled))))
+							   (cons (cons var var) (scan-var (cdr loc-ts) spilled))))))]
+				 [used-callee-regs (for/set ([kv (in-list var-map)] #:when (set-member? callee-saved (cdr kv))) (cdr kv))]
+				 [used-stack-size (* 8 (for/sum ([kv (in-list var-map)] #:when (Deref? (cdr kv))) 1))]
+				 [align-stack-size (* 16 (quotient (+ used-stack-size 15) 16))]
+				 [replace-instr 
+				   (lambda (instr)
+					 (match instr
+							[(Instr op args) 
+							 (Instr op (map (lambda (arg) 
+											  (let ([pr (assoc arg var-map)])
+												(if pr (cdr pr) arg)))
+											args))]
+							[_ instr]))])
+				(X86Program info 
+							(list
+							  (cons 'start 
+									(Block binfo (append (map replace-instr stmts) `(,(Jmp 'conclusion)))))
+							  (cons 'main
+									(Block '() (append
+												 `(,(Instr 'pushq `(,(Reg 'rbp)))
+												 ,(Instr 'movq `(,(Reg 'rsp) ,(Reg 'rbp))))
+												 (for/list ([reg (in-set used-callee-regs)]) (Instr 'pushq `(,reg)))
+												 `(,(Instr 'subq `(,(Imm align-stack-size) ,(Reg 'rsp))))
+												 `(,(Jmp 'start)))))
+							  (cons 'conclusion 
+									(Block '() (append
+												 `(,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
+												 (for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
+												 `(,(Instr 'popq `(,(Reg 'rbp))))
+												 `(,(Retq))))))))))
+;; print-x86 : x86 -> string 
+(define (print-x86 p)
+  (define (print-instr instr)
+	(let ([print-item
+			(lambda (item)
+			  (match item
+				[(Reg r) (~a "%" r)]
+				[(Imm n) (~a "$" n)]
+				[(Deref r o) (format "~a(%~a)" o r)]))])
+	(match instr
+	  [(Instr op args) (format "~a ~a" op (string-join (map print-item args) " "))]
+	  [(Jmp label) (~a "jmp " label)]
+	  [(Retq) "ret"]
+	  [(Callq func _) (~a "callq" func)])))
+
+  (match-let* ([(X86Program info lab-blks) p]
+			   [(Block info instrs) (cdr (assoc 'start lab-blks))]
+			   [stack-size (* (length (assoc 'locals-types info)) 8)])
+	(string-join 
+	  (map
+		(lambda (lab-blk)
+		  (let* ([label (car lab-blk)]
+				 [stmts (Block-instr* (cdr lab-blk))]
+				 [instr-strs (format "~s:\n\t ~a" label (string-join (map print-instr stmts) "\n\t"))])
+			(if (eq? label 'main)
+				(string-append "\t.global main\n" instr-strs)
+				instr-strs)))
+		lab-blks)
+	  "\n\n")))
