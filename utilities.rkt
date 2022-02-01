@@ -2072,13 +2072,18 @@ Changelog:
                            `(error timed-out ,timeout)]
 			  [(symbol=? res 'done-error)
                            `(error done-error ,(control-fun 'exit-code))]
-			  [else `(result done ,(read-line in1))])])
+                           ;`(error done ,(control-fun 'exit-code))]
+			  ;[else `(result done ,(read-line in1))])])
+			  [else `(result done ,(control-fun 'exit-code))])])
        (close-input-port in1)
        (close-input-port inErr)
        (close-output-port out)
        result)]))
 
 (define (compiler-tests-suite name typechecker passes test-family test-nums)
+  (define my-eval
+	(let ((ns (make-base-namespace)))
+	  (lambda (expr) (eval expr ns))))
   (let ([compiler (compile-file typechecker passes)])
     (make-test-suite
      "compiler tests"
@@ -2101,7 +2106,10 @@ Changelog:
 						     (call-with-input-file
 							 (format "tests/~a.res" test-name)
 						       (lambda (f) (read-line f)))
-						     "42")]
+						     ;"42")]
+						     (call-with-input-file
+							 (format "tests/~a.rkt" test-name)
+						       (lambda (f) (number->string (my-eval (read f))))))]
 					 [error-expected (file-exists? (format "tests/~a.err" test-name))])
 				     (let* ([command (format "./tests/~a.out ~a" test-name input)]
 					    [result (get-value-or-fail command output)])

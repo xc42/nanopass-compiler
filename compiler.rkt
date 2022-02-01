@@ -351,9 +351,9 @@
 						  (begin (set-for-each lives (lambda (x) (unless (equal? x d) (add-edge! g x d))))
 						  g)]
 						 [(Instr 'jmp `(,label)) g] ;TODO
-						 [(Call label _) g]; TODO
+						 [(Callq label _) g]; TODO
 						 )))
-			  (undirected-graph '())
+			  (foldl (lambda (v g) (add-vertex! g (Var v)) g) (undirected-graph '()) (map car (cdr (assoc 'locals-types (X86Program-info p)))))
 			  (map cons instrs (cdr live-sets))))])
   (match-let* ([(X86Program info lab-blks) p]
 			  [`(start . ,(Block binfo stmts)) (assoc 'start lab-blks)]
@@ -447,8 +447,8 @@
 									(Block '() (append
 												 `(,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
 												 (for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
-												 `(,(Instr 'popq `(,(Reg 'rbp))))
-												 `(,(Retq))))))))))
+												 `(,(Instr 'popq `(,(Reg 'rbp)))
+													,(Retq))))))))))
 ;; print-x86 : x86 -> string 
 (define (print-x86 p)
   (define (print-instr instr)
@@ -459,10 +459,10 @@
 				[(Imm n) (~a "$" n)]
 				[(Deref r o) (format "~a(%~a)" o r)]))])
 	(match instr
-	  [(Instr op args) (format "~a ~a" op (string-join (map print-item args) " "))]
+	  [(Instr op args) (format "~a ~a" op (string-join (map print-item args) ","))]
 	  [(Jmp label) (~a "jmp " label)]
-	  [(Retq) "ret"]
-	  [(Callq func _) (~a "callq" func)])))
+	  [(Retq) "retq"]
+	  [(Callq func _) (~a "callq " func)])))
 
   (match-let* ([(X86Program info lab-blks) p]
 			   [(Block info instrs) (cdr (assoc 'start lab-blks))]
