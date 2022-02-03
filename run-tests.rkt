@@ -3,6 +3,8 @@
 
 (require "utilities.rkt")
 (require "interp-Rvar.rkt")
+(require "interp-Rif.rkt")
+(require "type-check-Rif.rkt")
 (require "interp-Cvar.rkt")
 (require "interp.rkt")
 (require "compiler.rkt")
@@ -39,9 +41,15 @@
           (string=? r (car (string-split p "_"))))
         all-tests)))
 
-(interp-tests "var" #f passes interp-Rvar "var_test" (tests-for "var"))
+;(interp-tests "var" #f passes interp-Rvar "var_test" (tests-for "var"))
 
 ;; Uncomment the following when all the passes are complete to
 ;; test the final x86 code.
-(compiler-tests "var" #f passes "var_test" (tests-for "var"))
+;(compiler-tests "var" #f passes "var_test" (tests-for "var"))
 
+
+(define r2-passes
+  `( ("shrink" ,shrink ,interp-Rif)
+	))
+
+(interp-tests "r2" type-check-Rif r2-passes interp-Rif "r2_test" (tests-for "r2"))

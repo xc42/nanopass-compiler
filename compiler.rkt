@@ -70,6 +70,28 @@
   (match p
     [(Program info e) (Program info ((uniquify-exp '()) e))]))
 
+(define (shrink p)
+  (letrec
+	([shrink-exp
+	   (lambda (e)
+		 (match e
+				[(Prim (or '- 'and 'or '<= '>= '>) `(,e1 ,e2))
+				 (let ([se1 (shrink-exp e1)]
+					   [se2 (shrink-exp e2)]
+					   [T (Bool #t)]
+					   [F (Bool #f)])
+				   (match (Prim-op e)
+						  ['- (Prim '+ `(,se1 ,(Prim '- `(,se2))))]
+						  ['and (If se1 (If se2 T F) F)]
+						  ['or (If se1 T (If se2 T F))]
+						  ['<= (If (Prim '< `(,se1 ,se2)) T (If (Prim 'eq? `(,se1 ,se2)) T F))]
+						  ['>= (Prim 'not `(,(Prim '< `(,se1 ,se2))))]
+						  ['>  (If (Prim 'not `(,(Prim '< `(,se1 ,se2)))) (If (Prim 'eq? `(,se1 ,se2)) F T) F)]))]
+				[(Let v e body) (Let v (shrink-exp e) (shrink-exp body))]
+				[_ e]))])
+	(match p
+		   [(Program info e) (Program info (shrink-exp e))])))
+
 ;; remove-complex-opera* : R1 -> R1
 (define (remove-complex-opera* p)
   (define (rco-atom expr)
@@ -478,3 +500,4 @@
 				instr-strs)))
 		lab-blks)
 	  "\n\n")))
+
