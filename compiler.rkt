@@ -57,10 +57,12 @@
     (match e
       [(Var x)
        (Var (lookup x env))]
-      [(Int n) (Int n)]
+      [(Int n) e]
+	  [(Bool b) e]
       [(Let x e body)
        (let ([x* (gensym x)])
          (Let x* ((uniquify-exp env) e) ((uniquify-exp (extend-env env x x*)) body)))]
+	  [(If e1 e2 e3) (If ((uniquify-exp env) e1) ((uniquify-exp env) e2) ((uniquify-exp env) e3))]
 	  [(Prim 'read '()) e]
       [(Prim op es)
        (Prim op (for/list ([e es]) ((uniquify-exp env) e)))])))
@@ -88,36 +90,38 @@
 						  ['>= (Prim 'not `(,(Prim '< `(,se1 ,se2))))]
 						  ['>  (If (Prim 'not `(,(Prim '< `(,se1 ,se2)))) (If (Prim 'eq? `(,se1 ,se2)) F T) F)]))]
 				[(Let v e body) (Let v (shrink-exp e) (shrink-exp body))]
+				[(If cnd thn els) (If (shrink-exp cnd) (shrink-exp thn) (shrink-exp els))]
 				[_ e]))])
 	(match p
 		   [(Program info e) (Program info (shrink-exp e))])))
 
 ;; remove-complex-opera* : R1 -> R1
 (define (remove-complex-opera* p)
-  (define (rco-atom expr)
+  (define (rco-atom expr) ;;reduce whole expr tree to ANF , return reduced expr and a alist maintains tmpvar -> represented expr
     (let ([expr-sym (gensym 'tmp)])
       (match expr
-        [(Prim '+ `(,e1 ,e2)) 
+        [(Prim op `(,e1 ,e2)) 
          (if (atm? e1)
            (if (atm? e2)
              (values expr-sym `((,expr-sym . ,expr)))
              (values expr-sym 
                      (let-values ([(e2-sym e2-alist) (rco-atom e2)])
-                       (cons (cons expr-sym  (Prim '+ `(,e1 ,(Var e2-sym)))) e2-alist))))
+                       (cons (cons expr-sym  (Prim op `(,e1 ,(Var e2-sym)))) e2-alist))))
            (if (atm? e2)
              (values expr-sym 
                      (let-values ([(e1-sym e1-alist) (rco-atom e1)])
-                       (cons (cons expr-sym  (Prim '+ `(,(Var e1-sym) ,e2))) e1-alist)))
+                       (cons (cons expr-sym  (Prim op `(,(Var e1-sym) ,e2))) e1-alist)))
              (values expr-sym
                      (let-values ([(e1-sym e1-alist) (rco-atom e1)]
                                   [(e2-sym e2-alist) (rco-atom e2)])
-                       (cons (cons expr-sym (Prim '+ `(,(Var e1-sym) ,(Var e2-sym)))) (append e1-alist e2-alist))))))]
-        [(Prim '- `(,e))
+                       (cons (cons expr-sym (Prim op `(,(Var e1-sym) ,(Var e2-sym)))) (append e1-alist e2-alist))))))]
+        [(Prim op `(,e))
          (if (atm? e)
            (values expr-sym `((,expr-sym . ,expr)))
            (values expr-sym 
                    (let-values ([(e-sym e-alist) (rco-atom e)])
-                     (cons (cons expr-sym  (Prim '- `(,(Var e-sym)))) e-alist))))]
+                     (cons (cons expr-sym  (Prim op `(,(Var e-sym)))) e-alist))))]
+		[(If e1 e2 e3) (values expr-sym expr)]
         [(Let v e body) (values expr-sym (list (cons expr-sym (Let v (rco-expr e) (rco-expr body)))))])))
 
   (define (rco-expr expr)
@@ -128,23 +132,27 @@
                    (lambda (tmp-expr expr0)
                      (match tmp-expr
                        [(Int n) expr0]
+					   [(Bool b) expr0]
+					   [(If e1 e2 e3) expr0]
                        [(Var var) 
                         (let ([kv (assoc var alist)])
                           (if kv (build-from-branches (cdr kv) (Let var (cdr kv) expr0)) expr0))]
-                       [(Prim '- `(,e)) (build-from-branches e expr0)]
-                       [(Prim '+ `(,e1 ,e2)) (build-from-branches e1 (build-from-branches e2 expr0))]
+                       [(Prim op `(,e)) (build-from-branches e expr0)]
+                       [(Prim op `(,e1 ,e2)) (build-from-branches e2 (build-from-branches e1 expr0))]
                        [(Let v e body) (build-from-branches e (build-from-branches body expr0))]))])
                 build-from-branches))])
 
       (match expr
         [(Int n) expr]
         [(Var n) expr]
+		[(Bool b) expr]
+		[(If e1 e2 e3) expr] ;;for explicate-control
 		[(Prim 'read '()) expr]
         [_ (let-values ([(start-sym alist) (rco-atom expr)]) 
              (let ([tmp-expr (cdr (assoc start-sym alist))])
                (match tmp-expr
-                 [(Prim '+ _) ((build alist) tmp-expr tmp-expr)]
-                 [(Prim '- _) ((build alist) tmp-expr tmp-expr)]
+                 [(Prim op `(,e1 ,e2)) ((build alist) tmp-expr tmp-expr)]
+                 [(Prim op `(,e1)) ((build alist) tmp-expr tmp-expr)]
                  [_ tmp-expr])))])))
 
   (match p
@@ -160,12 +168,12 @@
          (match expr
            [(Let v e body)
             (explicate-assign v e (explicate-assign var body acc))]
-           [other (cons (Assign (Var var) expr) acc)]))]
+           [other (Seq (Assign (Var var) expr) acc)]))]
      [explicate-tail
        (lambda (expr)
          (match expr
            [(Let var e body)
-            (foldr Seq (explicate-tail body) (explicate-assign var e '()))]
+            (explicate-assign var e (explicate-tail body))]
            [other (Return expr)]))])
   (match p
     [(Program info e)

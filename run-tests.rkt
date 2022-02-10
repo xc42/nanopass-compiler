@@ -41,11 +41,11 @@
           (string=? r (car (string-split p "_"))))
         all-tests)))
 
-;(interp-tests "var" #f passes interp-Rvar "var_test" (tests-for "var"))
+(interp-tests "var" #f passes interp-Rvar "var_test" (tests-for "var"))
 
 ;; Uncomment the following when all the passes are complete to
 ;; test the final x86 code.
-;(compiler-tests "var" #f passes "var_test" (tests-for "var"))
+(compiler-tests "var" #f passes "var_test" (tests-for "var"))
 
 
 (define r2-passes
