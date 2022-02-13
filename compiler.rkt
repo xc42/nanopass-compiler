@@ -5,6 +5,7 @@
 (require "utilities.rkt")
 (require "type-check-Cvar.rkt")
 (require graph)
+(require racket/promise)
 (provide (all-defined-out))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -121,7 +122,7 @@
            (values expr-sym 
                    (let-values ([(e-sym e-alist) (rco-atom e)])
                      (cons (cons expr-sym  (Prim op `(,(Var e-sym)))) e-alist))))]
-		[(If e1 e2 e3) (values expr-sym expr)]
+		[(If e1 e2 e3) (values expr-sym (list (cons expr-sym (If (rco-expr e1) (rco-expr e2) (rco-expr e3)))))]
         [(Let v e body) (values expr-sym (list (cons expr-sym (Let v (rco-expr e) (rco-expr body)))))])))
 
   (define (rco-expr expr)
@@ -133,12 +134,12 @@
                      (match tmp-expr
                        [(Int n) expr0]
 					   [(Bool b) expr0]
-					   [(If e1 e2 e3) expr0]
                        [(Var var) 
                         (let ([kv (assoc var alist)])
                           (if kv (build-from-branches (cdr kv) (Let var (cdr kv) expr0)) expr0))]
                        [(Prim op `(,e)) (build-from-branches e expr0)]
                        [(Prim op `(,e1 ,e2)) (build-from-branches e2 (build-from-branches e1 expr0))]
+					   [(If e1 e2 e3) (foldl build-from-branches expr0 `(,e1 ,e2 ,e3))]
                        [(Let v e body) (build-from-branches e (build-from-branches body expr0))]))])
                 build-from-branches))])
 
@@ -162,22 +163,37 @@
 
 ;; explicate-control : R1 -> C0
 (define (explicate-control p)
-  (letrec
-    ([explicate-assign
-       (lambda (var expr acc)
-         (match expr
-           [(Let v e body)
-            (explicate-assign v e (explicate-assign var body acc))]
-           [other (Seq (Assign (Var var) expr) acc)]))]
-     [explicate-tail
-       (lambda (expr)
-         (match expr
-           [(Let var e body)
-            (explicate-assign var e (explicate-tail body))]
-           [other (Return expr)]))])
-  (match p
-    [(Program info e)
-     (CProgram info `((start . ,(explicate-tail e))))])))
+  (let* ([CFG (list)]
+		 [add-CFG
+		   (lambda (block [label-str ""])
+			 (let ([label (if (equal? label-str "") (gensym 'block) (string->symbol label-str))])
+			   (set! CFG (cons (cons label block) CFG))
+			   (Goto label)))])
+	(letrec
+	  ([explicate-assign
+		 (lambda (var expr acc)
+		   (match expr
+				  [(Let v e body) (explicate-assign v e (explicate-assign var body acc))]
+				  [(If pred thn els) (explicate-pred pred (explicate-assign var thn acc) (explicate-assign var els acc))]
+				  [other (Seq (Assign (Var var) expr) acc)]))]
+
+	   [explicate-pred
+		 (lambda (pred thn els)
+		   (match pred
+				  [(Prim (or 'eq? '<) rands) (IfStmt pred (add-CFG thn) (add-CFG els))]
+				  [(Bool b) (IfStmt pred (add-CFG thn) (add-CFG els))]
+				  [(Let v e body) (explicate-assign v e (explicate-pred body thn els))]
+				  [(If pred* thn* els*) (explicate-pred pred* (explicate-pred thn* thn els) (explicate-pred els* thn els))]))]
+
+	   [explicate-tail
+		 (lambda (expr)
+		   (match expr
+				  [(Let var e body) (explicate-assign var e (explicate-tail body))]
+				  [(If pred thn els) (explicate-pred pred (explicate-tail thn) (explicate-tail els))]
+				  [other (Return expr)]))])
+	  (match p
+			 [(Program info e)
+			  (CProgram info (begin (add-CFG (explicate-tail e) "start") CFG))]))))
 
        
 
