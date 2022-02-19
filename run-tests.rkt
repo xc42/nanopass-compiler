@@ -6,6 +6,7 @@
 (require "interp-Rif.rkt")
 (require "type-check-Rif.rkt")
 (require "interp-Cvar.rkt")
+(require "interp-Cif.rkt")
 (require "interp.rkt")
 (require "compiler.rkt")
 ;; (debug-level 1)
@@ -45,11 +46,15 @@
 
 ;; Uncomment the following when all the passes are complete to
 ;; test the final x86 code.
-(compiler-tests "var" #f passes "var_test" (tests-for "var"))
+;(compiler-tests "var" #f passes "var_test" (tests-for "var"))
 
 
 (define r2-passes
-  `( ("shrink" ,shrink ,interp-Rif)
+  `(("shrink" ,shrink ,interp-Rif)
+	("uniquify" ,uniquify ,interp-Rif)
+	("remove complex opera*" ,remove-complex-opera* ,interp-Rif)
+	("explicate control" ,explicate-control ,interp-Cif)
+	("instruction selection" ,select-instructions ,interp-x86-1)
 	))
 
-(interp-tests "r2" type-check-Rif r2-passes interp-Rif "r2_test" (tests-for "r2"))
+;(interp-tests "r2" type-check-Rif r2-passes interp-Rif "r2_test" (tests-for "r2"))

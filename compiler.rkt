@@ -3,7 +3,7 @@
 (require racket/fixnum)
 (require "interp-Rint.rkt")
 (require "utilities.rkt")
-(require "type-check-Cvar.rkt")
+(require "type-check-Cif.rkt")
 (require graph)
 (require racket/promise)
 (provide (all-defined-out))
@@ -78,18 +78,22 @@
 	([shrink-exp
 	   (lambda (e)
 		 (match e
-				[(Prim (or '- 'and 'or '<= '>= '>) `(,e1 ,e2))
-				 (let ([se1 (shrink-exp e1)]
-					   [se2 (shrink-exp e2)]
+				[(Prim op `(,e1 ,es ...))
+				 (let* ([e1 (shrink-exp e1)]
+					   [es (map shrink-exp es)]
+					   [new-es (cons e1 es)]
 					   [T (Bool #t)]
 					   [F (Bool #f)])
-				   (match (Prim-op e)
-						  ['- (Prim '+ `(,se1 ,(Prim '- `(,se2))))]
-						  ['and (If se1 (If se2 T F) F)]
-						  ['or (If se1 T (If se2 T F))]
-						  ['<= (If (Prim '< `(,se1 ,se2)) T (If (Prim 'eq? `(,se1 ,se2)) T F))]
-						  ['>= (Prim 'not `(,(Prim '< `(,se1 ,se2))))]
-						  ['>  (If (Prim 'not `(,(Prim '< `(,se1 ,se2)))) (If (Prim 'eq? `(,se1 ,se2)) F T) F)]))]
+				   (match op
+						  ['- (if (eq? es '()) 
+								  (Prim op `(,e1))
+								  (Prim '+ `(,e1 ,(Prim '- es))))]
+						  ['and (If e1 (If (car es) T F) F)]
+						  ['or (If e1 T (If (car es) T F))]
+						  ['<= (If (Prim '< new-es) T (If (Prim 'eq? new-es) T F))]
+						  ['>= (Prim 'not `(,(Prim '< new-es)))]
+						  ['>  (If (Prim 'not `(,(Prim '< new-es))) (If (Prim 'eq? new-es) F T) F)]
+						  [other (Prim op new-es)]))]
 				[(Let v e body) (Let v (shrink-exp e) (shrink-exp body))]
 				[(If cnd thn els) (If (shrink-exp cnd) (shrink-exp thn) (shrink-exp els))]
 				[_ e]))])
@@ -122,6 +126,7 @@
            (values expr-sym 
                    (let-values ([(e-sym e-alist) (rco-atom e)])
                      (cons (cons expr-sym  (Prim op `(,(Var e-sym)))) e-alist))))]
+		[(Prim op '()) (values expr-sym (list (cons expr-sym expr)))]
 		[(If e1 e2 e3) (values expr-sym (list (cons expr-sym (If (rco-expr e1) (rco-expr e2) (rco-expr e3)))))]
         [(Let v e body) (values expr-sym (list (cons expr-sym (Let v (rco-expr e) (rco-expr body)))))])))
 
@@ -137,6 +142,7 @@
                        [(Var var) 
                         (let ([kv (assoc var alist)])
                           (if kv (build-from-branches (cdr kv) (Let var (cdr kv) expr0)) expr0))]
+					   [(Prim op '()) expr0]
                        [(Prim op `(,e)) (build-from-branches e expr0)]
                        [(Prim op `(,e1 ,e2)) (build-from-branches e2 (build-from-branches e1 expr0))]
 					   [(If e1 e2 e3) (foldl build-from-branches expr0 `(,e1 ,e2 ,e3))]
@@ -147,8 +153,7 @@
         [(Int n) expr]
         [(Var n) expr]
 		[(Bool b) expr]
-		[(If e1 e2 e3) expr] ;;for explicate-control
-		[(Prim 'read '()) expr]
+		[(If e1 e2 e3) (If (rco-expr e1) (rco-expr e2) (rco-expr e3))] 
         [_ (let-values ([(start-sym alist) (rco-atom expr)]) 
              (let ([tmp-expr (cdr (assoc start-sym alist))])
                (match tmp-expr
@@ -166,30 +171,45 @@
   (let* ([CFG (list)]
 		 [add-CFG
 		   (lambda (block [label-str ""])
-			 (let ([label (if (equal? label-str "") (gensym 'block) (string->symbol label-str))])
-			   (set! CFG (cons (cons label block) CFG))
-			   (Goto label)))])
+			 (if (Goto? block)
+				 block
+				 (let ([label (if (equal? label-str "") (gensym 'block) (string->symbol label-str))])
+				   (set! CFG (cons (cons label block) CFG))
+				   (Goto label))))]
+		 [lz-add-CFG
+		   (lambda (block [label-str ""])
+			 (delay (add-CFG block label-str)))])
 	(letrec
 	  ([explicate-assign
 		 (lambda (var expr acc)
 		   (match expr
 				  [(Let v e body) (explicate-assign v e (explicate-assign var body acc))]
-				  [(If pred thn els) (explicate-pred pred (explicate-assign var thn acc) (explicate-assign var els acc))]
+				  [(If pred thn els)
+				   (let ([acc-label (add-CFG acc)])
+					 (explicate-pred pred  
+									 (lz-add-CFG (explicate-assign var thn acc-label))
+									 (lz-add-CFG (explicate-assign var els acc-label))))]
 				  [other (Seq (Assign (Var var) expr) acc)]))]
 
 	   [explicate-pred
-		 (lambda (pred thn els)
+		 (lambda (pred lz-thn lz-els)
 		   (match pred
-				  [(Prim (or 'eq? '<) rands) (IfStmt pred (add-CFG thn) (add-CFG els))]
-				  [(Bool b) (IfStmt pred (add-CFG thn) (add-CFG els))]
-				  [(Let v e body) (explicate-assign v e (explicate-pred body thn els))]
-				  [(If pred* thn* els*) (explicate-pred pred* (explicate-pred thn* thn els) (explicate-pred els* thn els))]))]
+				  [(Bool #t)  (force lz-thn)]
+				  [(Bool #f)  (force lz-els)]
+				  [(Var b) (IfStmt (Prim 'eq? `(,pred ,(Bool #t))) (force lz-thn) (force lz-els))]
+				  [(Prim (or 'eq? '<) rands) (IfStmt pred (force lz-thn) (force lz-els))]
+				  [(Prim 'not `(,pred*)) (explicate-pred pred* lz-els lz-thn)]
+				  [(Let v e body) (explicate-assign v e (explicate-pred body lz-thn lz-els))]
+				  [(If pred* thn* els*) 
+				   (explicate-pred pred* 
+								   (lz-add-CFG (explicate-pred thn* lz-thn lz-els)) 
+								   (lz-add-CFG (explicate-pred els* lz-thn lz-els)))]))]
 
 	   [explicate-tail
 		 (lambda (expr)
 		   (match expr
 				  [(Let var e body) (explicate-assign var e (explicate-tail body))]
-				  [(If pred thn els) (explicate-pred pred (explicate-tail thn) (explicate-tail els))]
+				  [(If pred thn els) (explicate-pred pred (lz-add-CFG (explicate-tail thn)) (lz-add-CFG (explicate-tail els)))]
 				  [other (Return expr)]))])
 	  (match p
 			 [(Program info e)
@@ -199,12 +219,32 @@
 
 ;; select-instructions : C0 -> pseudo-x86
 (define (select-instructions p)
+  (define (constant? e)
+	(or (Int? e) (Bool? e)))
+  (define (to-X86-val e)
+	(match e
+		   [(Int n) (Imm n)]
+		   [(Bool b) (Imm (if b 1 0))]
+		   [else e]))
+  (define (get-const-val r2)
+	(match r2
+	  [(Bool b) b]
+	  [(Int n) n]))
+
   (define (trans-C0-assign stmt)
 	(match-let ([(Assign dst expr) stmt])
 	   (match expr
 		 [(Int n) `(,(Instr 'movq (list (Imm n) dst)))]
+		 [(Bool b) `(,(Instr 'movq (list (Imm (if b 1 0)) dst)))]
 		 [(Var v) `(,(Instr 'movq (list (Var v) dst)))]
+
 		 [(Prim 'read '()) `(,(Callq 'read_int 0) ,(Instr 'movq (list (Reg 'rax) dst)))]
+		 [(Prim 'not `(,e)) 
+		  (match e
+				 [(Bool b) `(,(Instr 'movq (list(Imm (if b 0 1)) dst)))]
+				 [(Var v)  (if (equal? e dst)
+							   `(,(Instr 'xorq (list (Imm 1) dst)))
+							   `(,(Instr 'movq (list e dst)) ,(Instr 'xorq (list (Imm 1) dst))))])]
 		 [(Prim '- `(,e)) 
 		  (if (Int? e)
 			(match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) dst))))
@@ -224,28 +264,47 @@
 				(cond
 				  [(eq? v1 var) `(,(Instr 'addq (list e2 dst)))]
 				  [(eq? v2 var) `(,(Instr 'addq (list e1 dst)))]
-				  [else `(,(Instr 'movq (list e1 dst)) ,(Instr 'addq (list e2 dst)))]))])])))
+				  [else `(,(Instr 'movq (list e1 dst)) ,(Instr 'addq (list e2 dst)))]))])]
+		 [(Prim (or 'eq? '<) `(,e1 ,e2))
+		  (let-values ([(op cc) (if (eq? (Prim-op expr) 'eq?) 
+									   (values equal? 'e)
+									   (values < 'l))])
+			(cond 
+			  [(and (constant? e1) (constant? e2)) `(,(Instr 'movq (list (Imm (if (op (get-const-val e1) (get-const-val e2)) 1 0)) dst)))]
+			  [else `(,(Instr 'cmpq `(,(to-X86-val e2) ,(to-X86-val e1))) 
+					  ,(Instr 'set (list cc (Reg 'al))) 
+					  ,(Instr 'movzbq (list (Reg 'al) dst)))]))])))
+
   
   (define (trans-stmts stmts)
 	(match stmts
-	  [(Seq s1 tail) (append (trans-C0-assign s1) (trans-stmts tail))]
-	  [(Return expr) (match expr
-					   [(Prim '+ `(,e1 ,e2)) 
-						(cond
-						  [(and (Int? e1) (Int? e2)) 
-						   (match-let ([(Int n1) e1] [(Int n2) e2]) `(,(Instr 'movq (list (Imm (+ n1 n2)) (Reg 'rax)))))]
-						  [(Int? e1) (match-let ([(Int n1) e1]) 
-									   `(,(Instr 'movq (list (Imm n1) (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax)))))]
-						  [(Int? e2) (match-let ([(Int n2) e2]) 
-									   `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list (Imm n2) (Reg 'rax)))))]
-						  [else `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax))))])]
-					   [(Prim '- `(,e))
-						(if (Int? e)
-						  (match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) (Reg 'rax)))))
-						  `(,(Instr 'movq (list e (Reg 'rax))) ,(Instr 'negq (list (Reg 'rax)))))]
-					   [(Int n) `(,(Instr 'movq (list (Imm n) (Reg 'rax))))]
-					   [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
-  (match (type-check-Cvar p)
+		   [(Goto label) `(,(Jmp label))]
+		   [(Seq s1 tail) (append (trans-C0-assign s1) (trans-stmts tail))]
+		   [(IfStmt pred thn els)
+			(match-let ([(Prim op `(,e1 ,e2))  pred])
+					   (let ([v1 (to-X86-val e1)]
+							 [v2 (to-X86-val e2)]
+							 [flag (match op
+										  ['eq? 'e]
+										  ['< 'l])])
+						 `(,(Instr 'cmpq (list v2 v1)) ,(JmpIf flag (Goto-label thn)) ,(Jmp (Goto-label els)))))]
+		   [(Return expr) (match expr
+								 [(Prim '+ `(,e1 ,e2)) 
+								  (cond
+									[(and (Int? e1) (Int? e2)) 
+									 (match-let ([(Int n1) e1] [(Int n2) e2]) `(,(Instr 'movq (list (Imm (+ n1 n2)) (Reg 'rax)))))]
+									[(Int? e1) (match-let ([(Int n1) e1]) 
+														  `(,(Instr 'movq (list (Imm n1) (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax)))))]
+									[(Int? e2) (match-let ([(Int n2) e2]) 
+														  `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list (Imm n2) (Reg 'rax)))))]
+									[else `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax))))])]
+								 [(Prim '- `(,e))
+								  (if (Int? e)
+									  (match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) (Reg 'rax)))))
+									  `(,(Instr 'movq (list e (Reg 'rax))) ,(Instr 'negq (list (Reg 'rax)))))]
+								 [(Int n) `(,(Instr 'movq (list (Imm n) (Reg 'rax))))]
+								 [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
+  (match (type-check-Cif p)
 	[(CProgram info (list lab-sts ...))
 	 (X86Program info
 				 (map 
