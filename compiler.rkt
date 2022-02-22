@@ -401,70 +401,78 @@
 
 (define (uncover-live p)
   (match-letrec ([(X86Program info lab-blks) p]
-			   [lab-live-map (make-hash '())] ;;memorize
-			   [uncover-one-instr
-				 (lambda (instr live-after)
-				   (match instr
-						  [(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
-						   (if (Imm? arg1) 
-							   (set-add live-after arg2) 
-							   (set-union live-after (set arg1 arg2)))]
-						  [(Instr 'movq `(,arg1 ,arg2)) 
-						   (if (Imm? arg1) 
-							   (set-remove live-after arg2)
-							   (set-add (set-remove live-after arg2) arg1))]
-						  [(Instr 'negq `(,e)) (set-add live-after e)]
-						  [(Instr 'jmp `(,label)) (car (uncover-lab-blk (assoc label lab-blks)))]
-						  [(Callq label _) (set-remove live-after (apply set (map Reg '(rax rcx rdx rsi rdi r8 r9 r10 r11))))] ;;TODO
-						  [(Retq) live-after] ;;TODO
-						  ))]
-			  [uncover-block	(lambda (stmts) 
-								  (foldr (lambda (instr acc-live-set) (cons (uncover-one-instr instr (car acc-live-set)) acc-live-set))
-										 `(,(set))
-										 stmts))]
-			  [uncover-lab-blk (lambda (lab-blk)
-								 (let ([lab (car lab-blk)] [blk (cdr lab-blk)])
-								   (if (hash-has-key? lab-live-map lab)
-									   (hash-ref lab-live-map lab)
-									   (match-let* ([(Block info stmts) blk]
-												   [live-set (uncover-block stmts)])
-												   (begin 
-													 (hash-set! lab-live-map lab live-set) ;;remember this label's live set
-													 live-set)))))])
-			  (X86Program info 
-						  (map 
-							(lambda (lab-blk) 
-							  (match-let ([(cons label (Block info stmts)) lab-blk])
-										 (cons label (Block (cons (cons 'live-set (uncover-lab-blk lab-blk)) info) stmts))))
-							lab-blks))))
+				 [uncover-one-instr
+				   (lambda (instr acc-live-set)
+					 (let ([live-after (car acc-live-set)])
+					   (match instr
+							  [(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
+							   (if (Imm? arg1) 
+								   (set-add live-after arg2) 
+								   (set-union live-after (set arg1 arg2)))]
+							  [(Instr (or 'movq 'movzbq) `(,arg1 ,arg2)) 
+							   (if (Imm? arg1) 
+								   (set-remove live-after arg2)
+								   (set-add (set-remove live-after arg2) arg1))]
+							  [(Instr 'negq `(,e)) (set-add live-after e)]
+							  [(Instr 'cmpq rands) 
+							   (foldl (lambda (e st) (if (not (Imm? e)) (set-add st e) st))
+									  (set-union live-after (cadr acc-live-set)) ;;here assume cmp followed by JmpIf and Jmp
+									  rands)]
+							  [(Instr 'set `(,c ,arg2)) (set-remove live-after arg2)]
+							  [(Jmp label) (car (force (cdr (assoc label lazy-lab-live-sets))))]
+							  [(JmpIf c label) (car (force (cdr (assoc label lazy-lab-live-sets))))]
+							  [(Callq label _) (set-remove live-after (apply set (map Reg '(rax rcx rdx rsi rdi r8 r9 r10 r11))))] ;;TODO
+							  [(Retq) live-after] ;;TODO
+							  )))]
+				 [uncover-block	
+				   (lambda (stmts) 
+					 (foldr (lambda (instr acc-live-set) (cons (uncover-one-instr instr acc-live-set) acc-live-set))
+							`(,(set))
+							stmts))]
+				 [lazy-lab-live-sets
+				   (map 
+					 (lambda (lab-blk)
+					   (let ([lab (car lab-blk)]
+                             [blk (cdr lab-blk)])
+					   (cons lab (delay (uncover-block (Block-instr* blk))))))
+					 lab-blks)])
+				(X86Program info 
+							(map 
+							  (lambda (lab-blk) 
+								(match-let ([(cons label (Block info stmts)) lab-blk])
+										   (cons label (Block (cons (cons 'live-set (force (cdr (assoc label lazy-lab-live-sets)))) info) stmts))))
+							  lab-blks))))
 
 (define (build-interference p)
-  (let ([graph-from 
-		  (lambda (live-sets instrs)
-			(foldl
-			  (lambda (instr-lives g)
-				(let ([instr (car instr-lives)]
-					  [lives (cdr instr-lives)])
-				  (match instr
-						 [(Instr 'movq `(,s ,d)) 
-						  (begin (set-for-each lives (lambda (x) (unless (or (equal? x s) (equal? x d)) (add-edge! g x d))))
-						  g)]
-						 [(Instr (or 'addq 'subq) `(,s ,d))
-						  (begin (set-for-each lives (lambda (x) (unless (equal? x d) (add-edge! g x d))))
-						  g)]
-						 [(Instr 'negq `(,d))
-						  (begin (set-for-each lives (lambda (x) (unless (equal? x d) (add-edge! g x d))))
-						  g)]
-						 [(Instr 'jmp `(,label)) g] ;TODO
-						 [(Callq label _) g]; TODO
-						 )))
-			  (foldl (lambda (v g) (add-vertex! g (Var v)) g) (undirected-graph '()) (map car (cdr (assoc 'locals-types (X86Program-info p)))))
-			  (map cons instrs (cdr live-sets))))])
   (match-let* ([(X86Program info lab-blks) p]
-			  [`(start . ,(Block binfo stmts)) (assoc 'start lab-blks)]
-			  [`(live-set . ,live-sets) (assoc 'live-set binfo)])
-			  
-			  (X86Program (cons (cons 'conflicts (graph-from live-sets stmts)) info) lab-blks))))
+			   [infer-G
+				 (foldl 
+				   (lambda (v g) (add-vertex! g (Var v)) g) 
+				   (undirected-graph '()) 
+				   (map car (cdr (assoc 'locals-types (X86Program-info p)))))])
+			  (define (graph-from label)
+				(match-let* ([`(,label . ,(Block binfo instrs)) (assoc label lab-blks)]
+							 [`(live-set . ,live-sets) (assoc 'live-set binfo)]
+							 [g infer-G])
+							(for ([instr instrs]
+								  [lives (cdr live-sets)])
+								 (match instr
+										[(Instr 'movq `(,s ,d)) 
+										 (set-for-each lives (lambda (x) (unless (or (equal? x s) (equal? x d)) (add-edge! g x d))))]
+										[(Instr 'movzbq `(,(Reg 'al) ,d))
+										 (set-for-each lives (lambda (x) (unless (or (equal? x (Reg 'rax)) (equal? x d)) (add-edge! g x d))))]
+										[(Instr (or 'addq 'subq) `(,s ,d))
+										 (set-for-each lives (lambda (x) (unless (equal? x d) (add-edge! g x d))))]
+										[(Instr 'cmpq rands)
+										 (void)] ;no write, do nothing
+										[(Instr 'set `(,cc ,(Reg 'al))) 
+										 (set-for-each lives (lambda (x) (unless (equal? x (Reg 'rax)) (add-edge! g x (Reg 'rax)))))]
+										[(Instr 'negq `(,d))
+										 (set-for-each lives (lambda (x) (unless (equal? x d) (add-edge! g x d))))]
+										[(JmpIf f lab) (graph-from lab)]
+										[(Jmp lab) (graph-from lab)]))))
+			  (graph-from 'start)
+			  (X86Program (cons (cons 'conflicts infer-G) info) lab-blks)))
 
 (define (my-graph2dot graph file-name)
   (call-with-output-file
