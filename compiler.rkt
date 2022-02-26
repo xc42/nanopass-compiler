@@ -617,7 +617,7 @@
 																		  [(Jmp next) next]))])
 											  (if (null? jmps)
 												  (set label)
-												  (apply set-union (map find-tails jmps)))))])
+												  (apply set-union (cons (set label) (map find-tails jmps))))))])
 											
 									(lambda (lab-blk)
 									  (match-let ([(cons lab* (Block binfo* stmts*)) lab-blk])
@@ -636,13 +636,15 @@
 				[(Imm n) (~a "$" n)]
 				[(Deref r o) (format "~a(%~a)" o r)]))])
 	(match instr
+	  [(Instr 'set `(,cc ,arg)) (format "~a~a ~a" 'set cc (print-item arg))]
 	  [(Instr op args) (format "~a ~a" op (string-join (map print-item args) ","))]
+	  [(JmpIf f label) (format "~a~a ~a" 'j f label)]
 	  [(Jmp label) (~a "jmp " label)]
 	  [(Retq) "retq"]
 	  [(Callq func _) (~a "callq " func)])))
 
   (match-let* ([(X86Program info lab-blks) p]
-			   [(Block info instrs) (cdr (assoc 'start lab-blks))]
+			   [(Block _ instrs) (cdr (assoc 'start lab-blks))]
 			   [stack-size (* (length (assoc 'locals-types info)) 8)])
 	(string-join 
 	  (map

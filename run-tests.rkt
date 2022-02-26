@@ -57,7 +57,9 @@
 	("instruction selection" ,select-instructions ,interp-x86-1)
 	("remove jumps" ,remove-jumps ,interp-x86-1)
 	("allocate register" ,(lambda (p) (allocate-register (build-interference (uncover-live p)))) ,interp-x86-1)
-	;("patch instructions",patch-instructions ,interp-x86-1) 
+	("patch instructions",patch-instructions ,interp-x86-1) 
+	("print x86" ,print-x86 #f)
 	))
 
 (interp-tests "r2" type-check-Rif r2-passes interp-Rif "r2_test" (tests-for "r2"))
+(compiler-tests "r2" type-check-Rif r2-passes "r2_test" (tests-for "r2"))
