@@ -310,9 +310,54 @@
 				 (map 
 				   (lambda (ls)
 					 (let ([label (car ls)] [stmts (cdr ls)])
-					   (cons label (Block info (trans-stmts stmts)))))
+					   (cons label (Block '() (trans-stmts stmts)))))
 				   lab-sts))]))
 
+(define (remove-jumps p)
+  (define (occur-once xs)
+	(if (null? xs)
+		(set)
+		(let ([x (car xs)]
+			  [once (occur-once (cdr xs))])
+		  (if (set-member? once x)
+			  (set-remove once x)
+			  (set-add once x)))))
+  (let* ([lab-blks (X86Program-CFG p)]
+		 [scan-block
+		   (lambda (lab-blk)
+			 (for/fold ([jpif-ref (set)]
+						[jp-ref '()])
+					   ([stmt (Block-instr* (cdr lab-blk))] #:when (or (JmpIf? stmt) (Jmp? stmt)))
+					   (if (Jmp? stmt)
+						   (values jpif-ref (cons (Jmp-target stmt) jp-ref))
+						   (values (set-add jpif-ref (JmpIf-target stmt)) jp-ref))))]
+		 [tail-labels
+		   (for/fold ([acc-jpif-ref (set)]
+					  [acc-jp-ref '()]
+					  #:result (set-subtract (occur-once acc-jp-ref) acc-jpif-ref))
+					 ([lab-blk lab-blks])
+					 (let-values ([(jpif-ref jp-ref) (scan-block lab-blk)])
+					   (values (set-union jpif-ref acc-jpif-ref) (append jp-ref acc-jp-ref))))])
+	(letrec
+	  ([trans-stmts
+		 (lambda (stmts)
+		   (foldr 
+			 (lambda (instr acc)
+			   (match instr
+					  [(Jmp label) (if (set-member? tail-labels label)
+									   (append (trans-stmts (Block-instr* (cdr (assoc label lab-blks)))) acc)
+									   (cons instr acc))]
+					  [_ (cons instr acc)]))
+			 '()
+			 stmts))])
+	  (match-let ([(X86Program info lab-blks) p])
+				 (X86Program info
+							 (for/list ([lab-blk lab-blks]
+										#:unless (set-member? tail-labels (car lab-blk)))
+									   (match-let ([(Block binfo stmts) (cdr lab-blk)])
+												  (cons (car lab-blk) (Block binfo (trans-stmts stmts))))))))))
+
+					 
 
 ;; assign-homes : pseudo-x86 -> pseudo-x86
 (define (assign-homes p)
@@ -367,6 +412,9 @@
 				   [(Instr 'addq `(,(Deref r1 offset1) ,(Deref r2 offset2)))
 					`(,(Instr 'movq `(,(Deref r1 offset1) ,(Reg 'rax)))
 					  ,(Instr 'addq `(,(Reg 'rax) ,(Deref r2 offset2))))]
+				   [(Instr 'cmpq `(,x ,(Imm n)))
+					`(,(Instr 'movq `(,(Imm n) ,(Reg 'rax))) 
+					  ,(Instr 'cmpq `(,x ,(Reg 'rax))))]
 				   [else `(,instr)]))])
 	(match p
 	  [(X86Program info `(,lab-blks ...))
@@ -399,6 +447,8 @@
 		   [(Retq) (cons (set) (set))] ;;TODO
 		   )))
 
+;two ways:  1. calculate CFG and using tsort to get eval order
+;			2. using lazy eval
 (define (uncover-live p)
   (match-letrec ([(X86Program info lab-blks) p]
 				 [uncover-one-instr
@@ -436,7 +486,7 @@
                              [blk (cdr lab-blk)])
 					   (cons lab (delay (uncover-block (Block-instr* blk))))))
 					 lab-blks)])
-				(X86Program info 
+				(X86Program info
 							(map 
 							  (lambda (lab-blk) 
 								(match-let ([(cons label (Block info stmts)) lab-blk])
@@ -478,17 +528,13 @@
   (call-with-output-file
 	file-name #:exists 'replace
 	(lambda (out-file)
-	  (write-string "strict graph {" out-file) (newline out-file)
-	  (for ([v (in-vertices graph)])
-		   (write-string (format "~a;\n" v) out-file))
-	  (for ([u (in-vertices graph)])
-		   (for ([v (in-neighbors graph u)])
-				(write-string (format "~a -- ~a;\n" u v) out-file)))
-	  (write-string "}" out-file)
-	  (newline out-file))))
+	  (graphviz graph #:output out-file))))
 
 (define (my-get-X86-graph p)
   (cdr (assoc 'conflicts (X86Program-info p))))
+
+(define (my-get-ctrl-flow p)
+  (cdr (assoc 'control-flow (X86Program-info p))))
 
 (require "priority_queue.rkt")
 (define (color-graph G)
@@ -516,12 +562,12 @@
 			(pqueue-decrease-key! Q (hash-ref v-h v))
 			(colorize))))))
 
-(define (allocate-register P [limit-reg 1])
+(define (allocate-register P [limit-reg 3])
   (let* ([general-regs (apply vector (map Reg '(rbx rcx rdx rsi rdi r8 r9 r10 r11 r12 r13 r14 r15)))]
 		 [callee-saved (apply set (map Reg '(rsp rbp rbx r12 r13 r14 r15)))])
-	(match-let* ([(X86Program info lab-blk) P]
+	(match-let* ([(X86Program info lab-blks) P]
 				 [color-map (color-graph (cdr (assoc 'conflicts info)))]
-				 [(Block binfo stmts) (cdr (assoc 'start lab-blk))]
+				 [(Block binfo stmts) (cdr (assoc 'start lab-blks))]
 				 [var-map
 				   (let scan-var ([loc-ts (cdr (assoc 'locals-types info))] [spilled 1])
 					 (if (null? loc-ts)
@@ -546,22 +592,40 @@
 											args))]
 							[_ instr]))])
 				(X86Program info 
-							(list
-							  (cons 'start 
-									(Block binfo (append (map replace-instr stmts) `(,(Jmp 'conclusion)))))
+							(cons
 							  (cons 'main
 									(Block '() (append
 												 `(,(Instr 'pushq `(,(Reg 'rbp)))
-												 ,(Instr 'movq `(,(Reg 'rsp) ,(Reg 'rbp))))
+													,(Instr 'movq `(,(Reg 'rsp) ,(Reg 'rbp))))
 												 (for/list ([reg (in-set used-callee-regs)]) (Instr 'pushq `(,reg)))
 												 `(,(Instr 'subq `(,(Imm align-stack-size) ,(Reg 'rsp))))
 												 `(,(Jmp 'start)))))
-							  (cons 'conclusion 
-									(Block '() (append
-												 `(,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
-												 (for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
-												 `(,(Instr 'popq `(,(Reg 'rbp)))
-													,(Retq))))))))))
+							  (cons 
+								(cons 'conclusion 
+									  (Block '() (append
+												   `(,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
+												   (for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
+												   `(,(Instr 'popq `(,(Reg 'rbp)))
+													  ,(Retq)))))
+								(map 
+								  (let ([tails 
+										  (let find-tails ([label 'start])
+											(let* ([stmts (Block-instr* (cdr (assoc label lab-blks)))]
+												   [jmps (for/list ([stmt stmts] #:when (or (JmpIf? stmt) (Jmp? stmt)))
+																   (match stmt
+																		  [(JmpIf _ next) next]
+																		  [(Jmp next) next]))])
+											  (if (null? jmps)
+												  (set label)
+												  (apply set-union (map find-tails jmps)))))])
+											
+									(lambda (lab-blk)
+									  (match-let ([(cons lab* (Block binfo* stmts*)) lab-blk])
+												 (if (set-member? tails lab*)
+													 (cons lab* (Block binfo* (append (map replace-instr stmts*) `(,(Jmp 'conclusion)))))
+													 (cons lab* (Block binfo* (map replace-instr stmts*)))))))
+								  lab-blks)))))))
+
 ;; print-x86 : x86 -> string 
 (define (print-x86 p)
   (define (print-instr instr)

@@ -1,5 +1,5 @@
-(let ([x (read)])
-  (let ([y (read)])
+(let ([x 3])
+  (let ([y 4])
 	(if (if (< x 1)
 			(eq? x 0)
 			(eq? x 2))

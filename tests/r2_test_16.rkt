@@ -1,3 +1,3 @@
-(if (and (eq? (read) 0) (eq? (read) 1))
+(if (and (eq? (- 1 1) 0) (eq? (+ 1 2) 1))
 	0
 	42)

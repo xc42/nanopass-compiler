@@ -42,7 +42,7 @@
           (string=? r (car (string-split p "_"))))
         all-tests)))
 
-(interp-tests "var" #f passes interp-Rvar "var_test" (tests-for "var"))
+;(interp-tests "var" #f passes interp-Rvar "var_test" (tests-for "var"))
 
 ;; Uncomment the following when all the passes are complete to
 ;; test the final x86 code.
@@ -55,6 +55,9 @@
 	("remove complex opera*" ,remove-complex-opera* ,interp-Rif)
 	("explicate control" ,explicate-control ,interp-Cif)
 	("instruction selection" ,select-instructions ,interp-x86-1)
+	("remove jumps" ,remove-jumps ,interp-x86-1)
+	("allocate register" ,(lambda (p) (allocate-register (build-interference (uncover-live p)))) ,interp-x86-1)
+	;("patch instructions",patch-instructions ,interp-x86-1) 
 	))
 
-;(interp-tests "r2" type-check-Rif r2-passes interp-Rif "r2_test" (tests-for "r2"))
+(interp-tests "r2" type-check-Rif r2-passes interp-Rif "r2_test" (tests-for "r2"))
