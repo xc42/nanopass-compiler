@@ -53,26 +53,8 @@
 ;; HW1 Passes
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(define (uniquify-exp env)
-  (lambda (e)
-    (match e
-      [(Var x)
-       (Var (lookup x env))]
-      [(Int n) e]
-	  [(Bool b) e]
-      [(Let x e body)
-       (let ([x* (gensym x)])
-         (Let x* ((uniquify-exp env) e) ((uniquify-exp (extend-env env x x*)) body)))]
-	  [(If e1 e2 e3) (If ((uniquify-exp env) e1) ((uniquify-exp env) e2) ((uniquify-exp env) e3))]
-	  [(Prim 'read '()) e]
-      [(Prim op es)
-       (Prim op (for/list ([e es]) ((uniquify-exp env) e)))])))
 
-;; uniquify : R1 -> R1
-(define (uniquify p)
-  (match p
-    [(Program info e) (Program info ((uniquify-exp '()) e))]))
-
+;; R3 -> R3
 (define (shrink p)
   (letrec
 	([shrink-exp
@@ -96,10 +78,84 @@
 						  [other (Prim op new-es)]))]
 				[(Let v e body) (Let v (shrink-exp e) (shrink-exp body))]
 				[(If cnd thn els) (If (shrink-exp cnd) (shrink-exp thn) (shrink-exp els))]
+				[(HasType e t) (HasType (shrink-exp e) t)]
 				[_ e]))])
 	(match p
 		   [(Program info e) (Program info (shrink-exp e))])))
 
+(define (expose-allocation p)
+  (define (calc-vec-bytes-needed ts)
+	(+ 8 ;for vector tag header
+	   (foldl 
+		 (lambda (t n)
+		   (if (pair? t)
+			   (+ n (calc-vec-bytes-needed (cdr t)))
+			   (+ n 8)))
+		 0
+		 ts)))
+
+  (define (nested-let-expr vs es body)
+	(if (null? es)
+		body
+		(if (pair? vs)
+			(Let (car vs) (car es) (nested-let-expr (cdr vs) (cdr es) body))
+			(Let vs (car es) (nested-let-expr vs (cdr es) body)))))
+
+  (define (expose-allocation-expr expr)
+	(match expr
+		   [(Prim op es) (Prim op (map expose-allocation-expr es))]
+		   [(If pred thn els) (If (expose-allocation pred) (expose-allocation thn) (expose-allocation els))]
+		   [(Let v e body) (Let v (expose-allocation e) (expose-allocation body))]
+		   [(HasType (Prim 'vector es) ts)
+			(let* ([vs (map (lambda (x) (gensym 'vec-init)) es)]
+				   [bytes (calc-vec-bytes-needed (cdr ts))]
+				   [len (length vs)]
+				   [assign-body 
+					 (let ([var-vec (gensym 'alloc)])
+					   (Let  var-vec (Allocate len ts)
+							 (nested-let-expr '_ 
+											  (let all-assign ([idx 0] [vs* vs])
+												(if (null? vs*)
+													'()
+													(cons (Prim 'vector-set! `(,(Var var-vec) ,(Var (car vs*))))
+														  (all-assign (+ idx 1) (cdr vs*))))) 
+											  (Var var-vec))))]
+				   [alloc-body
+					 (Let '_ 
+						  (If (Prim '< 
+									(list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Int bytes)))
+										  (GlobalValue 'fromspace_end)))
+							  (Void)
+							  (Collect bytes))
+						  assign-body)])
+			  (nested-let-expr vs (map expose-allocation-expr es) alloc-body))]
+		   [atm-expr atm-expr]))
+
+  (match-let ([(Program info e) p])
+			 (Program info (expose-allocation-expr e))))
+																				  
+
+
+;; uniquify : R3 -> R3
+(define (uniquify p)
+  (define (uniquify-exp env)
+	(lambda (e)
+	  (match e
+			 [(Var x)
+			  (Var (lookup x env))]
+			 [(Int n) e]
+			 [(Bool b) e]
+			 [(Let x e body)
+			  (let ([x* (gensym x)])
+				(Let x* ((uniquify-exp env) e) ((uniquify-exp (extend-env env x x*)) body)))]
+			 [(If e1 e2 e3) (If ((uniquify-exp env) e1) ((uniquify-exp env) e2) ((uniquify-exp env) e3))]
+			 [(Prim 'read '()) e]
+			 [(Prim op es)
+			  (Prim op (for/list ([e es]) ((uniquify-exp env) e)))])))
+  (match p
+		 [(Program info e) (Program info ((uniquify-exp '()) e))]))
+
+			
 ;; remove-complex-opera* : R1 -> R1
 (define (remove-complex-opera* p)
   (define (rco-atom expr) ;;reduce whole expr tree to ANF , return reduced expr and a alist maintains tmpvar -> represented expr
