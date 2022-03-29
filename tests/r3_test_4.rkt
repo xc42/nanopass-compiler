@@ -1,0 +1,5 @@
+(let ([x (vector 1 2 3 3 4 5)])
+  (let ([y (vector 42 x)])
+	(let ([z (vector 43 (vector-ref y 1))])
+	  (let ([_ (vector-set! y 1 z)])
+		(vector-ref (vector-ref y 1) 4)))))

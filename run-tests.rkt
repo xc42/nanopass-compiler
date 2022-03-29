@@ -8,6 +8,7 @@
 (require "type-check-Rvec.rkt")
 (require "interp-Cvar.rkt")
 (require "interp-Cif.rkt")
+(require "interp-Cvec.rkt")
 (require "interp-Rvec.rkt")
 (require "interp-Rvec-prime.rkt")
 (require "interp.rkt")
@@ -64,15 +65,15 @@
 	("print x86" ,print-x86 #f)
 	))
 
-;(interp-tests "r2" type-check-Rif r2-passes interp-Rif "r2_test" (tests-for "r2"))
-;(compiler-tests "r2" type-check-Rif r2-passes "r2_test" (tests-for "r2"))
+(interp-tests "r2" type-check-Rif r2-passes interp-Rif "r2_test" (tests-for "r2"))
+(compiler-tests "r2" type-check-Rif r2-passes "r2_test" (tests-for "r2"))
 
 (define r3-passes
   `(("shrink" ,shrink ,interp-Rvec)
 	("uniquify" ,uniquify ,interp-Rvec)
 	("expose allocation" ,expose-allocation ,interp-Rvec-prime)
 	("remove complex opera*" ,remove-complex-opera* ,interp-Rvec-prime)
-	;;("explicate control" ,explicate-control ,interp-Cif)
+	("explicate control" ,explicate-control ,interp-Cvec)
 	;;("instruction selection" ,select-instructions ,interp-x86-1)
 	;;("remove jumps" ,remove-jumps ,interp-x86-1)
 	;;("allocate register" ,(lambda (p) (allocate-register (build-interference (uncover-live p)))) ,interp-x86-1)
@@ -80,5 +81,5 @@
 	;;("print x86" ,print-x86 #f)
 	))
 
-(interp-tests "r3" type-check-Rvec r3-passes interp-Rvec "r3_test" (tests-for "r3"))
+;(interp-tests "r3" type-check-Rvec r3-passes interp-Rvec "r3_test" (tests-for "r3"))
 ;(compiler-tests "r3" type-check-Rvec r3-passes "r3_test" (tests-for "r3"))

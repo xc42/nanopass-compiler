@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include "runtime.h"
+#include <iostream>
 
 // To do: we need to account for the "any" type. -Jeremy
 
@@ -94,17 +95,17 @@ void initialize(uint64_t rootstack_size, uint64_t heap_size)
   assert((rootstack_size % sizeof(int64_t)) == 0);
 
   // 2. Allocate memory (You should always check if malloc gave you memory)
-  if (!(fromspace_begin = malloc(heap_size))) {
+  if (!(fromspace_begin = (int64_t*)malloc(heap_size))) {
     printf("Failed to malloc %" PRIu64 " byte fromspace\n", heap_size);
     exit(EXIT_FAILURE);
   }
 
-  if (!(tospace_begin = malloc(heap_size))) {
+  if (!(tospace_begin = (int64_t*)malloc(heap_size))) {
     printf("Failed to malloc %" PRIu64 " byte tospace\n", heap_size);
     exit(EXIT_FAILURE);
   }
 
-  if (!(rootstack_begin = malloc(rootstack_size))) {
+  if (!(rootstack_begin = (int64_t**)malloc(rootstack_size))) {
     printf("Failed to malloc %" PRIu64 " byte rootstack", rootstack_size);
     exit(EXIT_FAILURE);
   }
@@ -191,7 +192,7 @@ void collect(int64_t** rootstack_ptr, uint64_t bytes_requested)
     // Free and allocate a new tospace of size new_bytes
     free(tospace_begin);
 
-    if (!(tospace_begin = malloc(new_bytes))) {
+    if (!(tospace_begin = (int64_t*)malloc(new_bytes))) {
       printf("failed to malloc %ld byte fromspace", new_bytes);
       exit(EXIT_FAILURE);
     }
@@ -209,7 +210,7 @@ void collect(int64_t** rootstack_ptr, uint64_t bytes_requested)
     // tospace not fromspace as we might expect.
     free(tospace_begin);
 
-    if (!(tospace_begin = malloc(new_bytes))) {
+    if (!(tospace_begin = (int64_t*)malloc(new_bytes))) {
       printf("failed to malloc %ld byte tospace", new_bytes);
       exit(EXIT_FAILURE);
     }
@@ -501,7 +502,9 @@ void copy_vector(int64_t** vector_ptr_loc)
 // Read an integer from stdin
 int64_t read_int() {
   int64_t i;
-  scanf("%" SCNd64, &i);
+  //scanf("%" SCNd64, &i);
+  //return i;
+  std::cin >> i;
   return i;
 }
 

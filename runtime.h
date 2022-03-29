@@ -4,6 +4,7 @@
 // 64-bits.
 #include <stdint.h>
 
+extern "C" {
 // Fromspace is our heap which is conceptually an array of 64 bit data
 // unless meta information tells us more about about their contents.
 int64_t* fromspace_begin;
@@ -46,3 +47,5 @@ void print_space();
 
 void print_ellipsis();
 void print_any(int64_t any);
+
+}
