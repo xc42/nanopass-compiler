@@ -4,6 +4,7 @@
 (require "interp-Rint.rkt")
 (require "utilities.rkt")
 (require "type-check-Cvec.rkt")
+(require (prefix-in runtime-config:: "runtime-config.rkt"))
 (require graph)
 (require racket/promise)
 (provide (all-defined-out))
@@ -305,8 +306,8 @@
 			(cond 
 			  [(and (constant? e1) (constant? e2)) `(,(Instr 'movq (list (Imm (if (op (get-const-val e1) (get-const-val e2)) 1 0)) dst)))]
 			  [else `(,(Instr 'cmpq `(,(to-X86-val e2) ,(to-X86-val e1))) 
-					  ,(Instr 'set (list cc (Reg 'al))) 
-					  ,(Instr 'movzbq (list (Reg 'al) dst)))]))]
+					  ,(Instr 'set (list cc (ByteReg 'al))) 
+					  ,(Instr 'movzbq (list (ByteReg 'al) dst)))]))]
 		 [(Allocate len ts)
 		  (list (Instr 'movq `(,(Global 'free_ptr) ,(Reg 'r11)))
 				(Instr 'addq `(,(Imm (* 8 (+ len 1))) ,(Global 'free_ptr)))
@@ -351,7 +352,10 @@
 								 [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
   (match (type-check-Cvec p)
 	[(CProgram info (list lab-sts ...))
-	 (X86Program info
+	 (X86Program (cons 
+				   (cons 'num-root-spills  ; for interp-x86-2
+						 (length (filter (lambda (ts) (and (pair? ts) (eq? 'Vector (car ts)))) (assoc 'locals-types info))))
+				   info)
 				 (map 
 				   (lambda (ls)
 					 (let ([label (car ls)] [stmts (cdr ls)])
@@ -474,23 +478,37 @@
 						  lab-blks))])))
 
 
+;objects add to interference graph 
+(define (get-infer-objs rands)
+  (let ( [infer-obj
+		   (lambda (rand)
+			 (cond
+			   [(or (Var? rand) (Reg? rand)) rand]
+			   [(ByteReg? rand) (Reg (byte-reg->full-reg (ByteReg-name rand)))]
+			   [(Deref? rand) (Reg (Deref-reg rand))]
+			   [(Imm? rand) #f]
+			   [else (error (format "unhandled operand ~a in get-instr-RW-set" rand))]))])
+	(if (null? rands)
+		'()
+		(let ([obj (infer-obj (car rands))])
+		  (if obj 
+			  (cons obj (get-infer-objs (cdr rands)))
+			  (get-infer-objs (cdr rands)))))))
 
 (define (get-instr-RW-set instr)
-  (lambda (instr)
-	(match instr
-		   [(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
-			(if (Imm? arg1) 
-				(cons (set arg2) (set)) 
-				(cons (set arg1 arg2) (set)))]
-		   [(Instr 'movq `(,arg1 ,arg2)) 
-			(if (Imm? arg1) 
-				(cons (set) (set arg2))
-				(cons (set arg1) (set arg2)))]
-		   [(Instr 'negq `(,e)) (cons (set e) (set))]
-		   [(Instr 'jmp `(,label)) (cons (set) (set))] ;;TODO
-		   [(Callq label _) (cons (set) (apply set (map Reg '(rax rcx rdx rsi rdi r8 r9 r10 r11))))] ;;TODO
-		   [(Retq) (cons (set) (set))] ;;TODO
-		   )))
+  (let ([rw
+		  (match instr
+				 [(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
+				  (cons `(,arg1 ,arg2) `(,arg2))]
+				 [(Instr (or 'movq 'movzbq) `(,arg1 ,arg2)) 
+				  (cons `(,arg1) `(,arg2))]
+				 [(Instr 'negq `(,e)) (cons `(,e) `(,e))]
+				 [(Instr 'set `(,c ,arg2)) (cons '() `(,arg2))]
+				 [(Instr 'cmpq rands) (cons rands '())]
+				 [(Callq label arity) (cons (for/list ([x (vector-take arg-registers arity)]) (Reg x)) (for/list ([r caller-save]) (Reg r)))]
+				 [_ (error (format "unhandled instr ~a in get-instr-RW-set" instr))])])
+	  (cons (apply set (get-infer-objs (car rw))) (apply set (get-infer-objs (cdr rw))))))
+				
 
 ;two ways:  1. calculate CFG and using tsort to get eval order
 ;			2. using lazy eval
@@ -500,25 +518,15 @@
 				   (lambda (instr acc-live-set)
 					 (let ([live-after (car acc-live-set)])
 					   (match instr
-							  [(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
-							   (if (Imm? arg1) 
-								   (set-add live-after arg2) 
-								   (set-union live-after (set arg1 arg2)))]
-							  [(Instr (or 'movq 'movzbq) `(,arg1 ,arg2)) 
-							   (if (Imm? arg1) 
-								   (set-remove live-after arg2)
-								   (set-add (set-remove live-after arg2) arg1))]
-							  [(Instr 'negq `(,e)) (set-add live-after e)]
 							  [(Instr 'cmpq rands) 
-							   (foldl (lambda (e st) (if (not (Imm? e)) (set-add st e) st))
-									  (set-union live-after (cadr acc-live-set)) ;;here assume cmp followed by JmpIf and Jmp
-									  rands)]
-							  [(Instr 'set `(,c ,arg2)) (set-remove live-after arg2)]
+							   (for/fold ([lives (set-union live-after (cadr acc-live-set))]) ;;here assume cmp followed by JmpIf and Jmp
+										 ([x (car (get-instr-RW-set instr))])
+										 (set-add lives x))]
 							  [(Jmp label) (car (force (cdr (assoc label lazy-lab-live-sets))))]
 							  [(JmpIf c label) (car (force (cdr (assoc label lazy-lab-live-sets))))]
-							  [(Callq label arity) (set-union (set-remove live-after (set-map caller-save Reg))
-															  (vector->set (vector-take arg-registers arity)))] 
 							  [(Retq) live-after] ;;TODO
+							  [_ (let ([rw (get-instr-RW-set instr)])
+								   (set-union (set-subtract live-after (cdr rw)) (car rw)))] 
 							  )))]
 				 [uncover-block	
 				   (lambda (stmts) 
@@ -528,8 +536,8 @@
 				 [lazy-lab-live-sets
 				   (map 
 					 (lambda (lab-blk)
-					   (let ([lab (car lab-blk)]
-                             [blk (cdr lab-blk)])
+					   (let ([lab (car lab-blk)] 
+							 [blk (cdr lab-blk)])
 					   (cons lab (delay (uncover-block (Block-instr* blk))))))
 					 lab-blks)])
 				(X86Program info
@@ -554,18 +562,11 @@
 							(for ([instr instrs]
 								  [lives (cdr live-sets)])
 								 (match instr
-										[(Instr 'movq `(,s ,d)) 
+										[(Instr (or 'movq 'movzbq) `(,s ,d)) 
 										 (set-for-each lives (lambda (x) (unless (or (equal? x s) (equal? x d)) (add-edge! g x d))))]
-										[(Instr 'movzbq `(,(Reg 'al) ,d))
-										 (set-for-each lives (lambda (x) (unless (or (equal? x (Reg 'rax)) (equal? x d)) (add-edge! g x d))))]
-										[(Instr (or 'addq 'subq) `(,s ,d))
-										 (set-for-each lives (lambda (x) (unless (equal? x d) (add-edge! g x d))))]
-										[(Instr 'cmpq rands)
-										 (void)] ;no write, do nothing
-										[(Instr 'set `(,cc ,(Reg 'al))) 
-										 (set-for-each lives (lambda (x) (unless (equal? x (Reg 'rax)) (add-edge! g x (Reg 'rax)))))]
-										[(Instr 'negq `(,d))
-										 (set-for-each lives (lambda (x) (unless (equal? x d) (add-edge! g x d))))]
+										[(Instr 'movzbq `(,(ByteReg br) ,d))
+										 (let ([fr (Reg (byte-reg->full-reg (ByteReg-name br)))])
+										 (set-for-each lives (lambda (x) (unless (or (equal? x fr) (equal? x d)) (add-edge! g x d)))))]
 										[(JmpIf f lab) (graph-from lab)]
 										[(Jmp lab) (graph-from lab)]
 										[(Callq label arity) 
@@ -574,14 +575,19 @@
 														   (lambda (x)
 															 (let ([is-vec-type
 																	 (and (Var? x) 
-																		  (let ([ts (assoc (Var-name x) loc-ts)])
-																			(and ts (pair? ts) (eq? 'Vector (cadr ts)))))])
+																		  (let ([ts (assoc (Var-name x) (cdr loc-ts))])
+																			(and ts (pair? ts) (eq? 'Vector (cdr ts)))))])
 															   (for ([d (if is-vec-type (set-union caller-save callee-save) caller-save)])
 																	(unless (equal? x d) (add-edge! g x (Reg d)))))))
 											 (set-for-each lives 
 														   (lambda (x) 
 															 (for ([d caller-save]) 
-																  (unless (equal? x d) (add-edge! g x (Reg d)))))))]))))
+																  (unless (equal? x d) (add-edge! g x (Reg d)))))))]
+										[_ (let ([w (cdr (get-instr-RW-set instr))])
+											 (set-for-each lives 
+														   (lambda (x)
+															 (for ([d w] #:unless (equal? x d))
+																  (add-edge! g x d)))))]))))
 			  (graph-from 'start)
 			  (X86Program (cons (cons 'conflicts infer-G) info) lab-blks)))
 
@@ -596,7 +602,7 @@
 				   (apply set acc)
 				   (let ([u (stream-first us)])
 					 (cond 
-					   [(Var? u) 
+					   [(or (Var? u) (Global? u))
 						(if (hash-has-key? color-map u) 
 							(get-color (stream-rest us) (cons (hash-ref color-map u) acc))
 							(get-color (stream-rest us) acc))]
@@ -621,7 +627,7 @@
 			(pqueue-decrease-key! Q (hash-ref v-h v))
 			(colorize))))))
 
-(define (allocate-register P [limit-reg 3] [rootstack-size (* 8 32)] [heap-size 4096])
+(define (allocate-register P [limit-reg 3] [rootstack-size (runtime-config::rootstack-size)] [heap-size (runtime-config::heap-size)])
   (match-let* ([(X86Program info lab-blks) P]
 			   [color-map (color-graph (cdr (assoc 'conflicts info)))]
 			   [(Block binfo stmts) (cdr (assoc 'start lab-blks))]
@@ -653,7 +659,7 @@
 											  (if pr (cdr pr) arg)))
 										  args))]
 						  [_ instr]))])
-			  (X86Program info 
+			  (X86Program (cons (cons 'num-root-spills (unbox rootst-spilled-bx)) info)
 						  (cons
 							(cons 'main
 								  (Block '() (append
@@ -702,6 +708,7 @@
 			(lambda (item)
 			  (match item
 				[(Reg r) (~a "%" r)]
+				[(ByteReg br) (~a item)]
 				[(Imm n) (~a "$" n)]
 				[(Global g) (~a  g "(%rip)")]
 				[(Deref r o) (format "~a(%~a)" o r)]))])
