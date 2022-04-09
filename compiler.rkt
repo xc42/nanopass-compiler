@@ -297,7 +297,7 @@
 				(Instr 'movq `(,(Deref 'r11 (* 8 (+ (Int-value i) 1))) ,dst)))]
 		 [(Prim 'vector-set! `(,v ,i ,arg))
 		  (list (Instr 'movq `(,v ,(Reg 'r11)))
-				(Instr 'movq `(,arg ,(Deref 'r11 (* 8 (+ (Int-value i) 1)))))
+				(Instr 'movq `(,(to-X86-val arg) ,(Deref 'r11 (* 8 (+ (Int-value i) 1)))))
 				(Instr 'movq `(,(Imm 0) ,dst)))]
 		 [(Prim (or 'eq? '<) `(,e1 ,e2))
 		  (let-values ([(op cc) (if (eq? (Prim-op expr) 'eq?) 
@@ -487,7 +487,8 @@
 			   [(ByteReg? rand) (Reg (byte-reg->full-reg (ByteReg-name rand)))]
 			   [(Deref? rand) (Reg (Deref-reg rand))]
 			   [(Imm? rand) #f]
-			   [else (error (format "unhandled operand ~a in get-instr-RW-set" rand))]))])
+			   [(Global? rand) #f] ;TODO
+			   [else (error (format "unhandled operand ~a in get-infer-objs" rand))]))])
 	(if (null? rands)
 		'()
 		(let ([obj (infer-obj (car rands))])
@@ -562,11 +563,18 @@
 							(for ([instr instrs]
 								  [lives (cdr live-sets)])
 								 (match instr
-										[(Instr (or 'movq 'movzbq) `(,s ,d)) 
-										 (set-for-each lives (lambda (x) (unless (or (equal? x s) (equal? x d)) (add-edge! g x d))))]
+										[(Instr 'movq `(,s ,d)) 
+										 (let ([s* (get-infer-objs `(,s))]
+											   [d* (get-infer-objs `(,d))])
+										   (set-for-each lives 
+														 (lambda (x) 
+														   (unless (or (and (not (null? s*)) (equal? x (car s*)))
+																	   (and (not (null? d*)) (equal? x (car d*)))) 
+															 (add-edge! g x (car d*))))))]
 										[(Instr 'movzbq `(,(ByteReg br) ,d))
-										 (let ([fr (Reg (byte-reg->full-reg (ByteReg-name br)))])
-										 (set-for-each lives (lambda (x) (unless (or (equal? x fr) (equal? x d)) (add-edge! g x d)))))]
+										 (let ([fr (Reg (byte-reg->full-reg (ByteReg-name br)))]
+											   [d* (get-infer-objs `(,d))])
+										 (set-for-each lives (lambda (x) (unless (or (equal? x fr) (equal? x (car d*))) (add-edge! g x (car d*))))))]
 										[(JmpIf f lab) (graph-from lab)]
 										[(Jmp lab) (graph-from lab)]
 										[(Callq label arity) 
@@ -643,7 +651,7 @@
 							 (let ([reg-idx (hash-ref color-map var)])
 							   (if (or (< reg-idx 0) (>= reg-idx limit-reg))
 								   (if  is-vec-type
-									 (cons (cons var (Deref rootstack-reg (* 8 (+ 1 rootst-spilled)))) (scan-var (cdr loc-ts spilled (+ rootst-spilled 1)))) ; spill to rootstack for gc
+									 (cons (cons var (Deref rootstack-reg (* 8 (+ 1 rootst-spilled)))) (scan-var (cdr loc-ts) spilled (+ rootst-spilled 1))) ; spill to rootstack for gc
 									 (cons (cons var (Deref 'rbp (* -8 (+ 1 spilled)))) (scan-var (cdr loc-ts) (+ spilled 1) rootst-spilled)))
 								   (cons (cons var (Reg (vector-ref general-registers reg-idx))) (scan-var (cdr loc-ts) spilled rootst-spilled))))
 							 (cons (cons var var) (scan-var (cdr loc-ts) spilled))))))]

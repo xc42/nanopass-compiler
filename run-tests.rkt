@@ -65,8 +65,8 @@
 	("print x86" ,print-x86 #f)
 	))
 
-(interp-tests "r2" type-check-Rif r2-passes interp-Rif "r2_test" (tests-for "r2"))
-(compiler-tests "r2" type-check-Rif r2-passes "r2_test" (tests-for "r2"))
+;(interp-tests "r2" type-check-Rif r2-passes interp-Rif "r2_test" (tests-for "r2"))
+;(compiler-tests "r2" type-check-Rif r2-passes "r2_test" (tests-for "r2"))
 
 (define r3-passes
   `(("shrink" ,shrink ,interp-Rvec)
@@ -81,5 +81,5 @@
 	("print x86" ,print-x86 #f)
 	))
 
-;(interp-tests "r3" type-check-Rvec r3-passes interp-Rvec "r3_test" (tests-for "r3"))
-;(compiler-tests "r3" type-check-Rvec r3-passes "r3_test" (tests-for "r3"))
+(interp-tests "r3" type-check-Rvec r3-passes interp-Rvec "r3_test" (tests-for "r3"))
+(compiler-tests "r3" type-check-Rvec r3-passes "r3_test" (tests-for "r3"))
