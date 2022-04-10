@@ -55,7 +55,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
-;; R3 -> R3
+;; R4 -> R4
 (define (shrink p)
   (letrec
 	([shrink-exp
@@ -80,12 +80,19 @@
 				[(Let v e body) (Let v (shrink-exp e) (shrink-exp body))]
 				[(If cnd thn els) (If (shrink-exp cnd) (shrink-exp thn) (shrink-exp els))]
 				[(HasType e t) (HasType (shrink-exp e) t)]
+				[(Apply f args) (Apply (shrink-exp f) (shrink-exp args))]
 				[_ e]))])
 	(match p
-		   [(Program info e) (Program info (shrink-exp e))])))
+		   [(Program info body) (Program info (shrink-exp body))]
+		   [(ProgramDefsExp info defs expr) 
+			(ProgramDefs info (append defs `(,(Def 'main '() 'Integer '() (shrink-exp expr)))))])))
 
-
-;; uniquify : R3 -> R3
+(define (map-program-def-body f p)
+  (match-let ([(ProgramDefs info defs) p])
+			 (ProgramDefs info (for/list ([def (in-list defs)])
+										 (match-let ([(Def fn ps rt info e) def])
+													(Def fn ps rt info (f e)))))))
+;; uniquify : R4 -> R4
 (define (uniquify p)
   (define (uniquify-exp env)
 	(lambda (e)
@@ -98,12 +105,75 @@
 			 [(Let x e body)
 			  (let ([x* (gensym x)])
 				(Let x* ((uniquify-exp env) e) ((uniquify-exp (extend-env env x x*)) body)))]
-			 [(If e1 e2 e3) (If ((uniquify-exp env) e1) ((uniquify-exp env) e2) ((uniquify-exp env) e3))]
-			 [(Prim 'read '()) e]
-			 [(Prim op es)
-			  (Prim op (for/list ([e es]) ((uniquify-exp env) e)))])))
+			 [(If e1 e2 e3)
+			  (let ([uniq (uniquify-exp env)]) 
+				(If (uniq e1) (uniq e2) (uniq e3)))]
+			 [(Prim op es) (Prim op (map (uniquify-exp env) es))]
+			 [(Apply f args) 
+			  (let ([uniq (uniquify-exp env)]) 
+				(Apply (uniq f) (uniq args)))])))
   (match p
-		 [(Program info e) (Program info ((uniquify-exp '()) e))]))
+		 [(Program info body) (Program info (uniquify-exp body))]
+		 [(? ProgramDefs?)
+		  (map-program-def-body (lambda (body) ((uniquify-exp '()) body)) p)]))
+
+
+;; R4 -> R4
+(define (reveal-functions p)
+  (let ([fs (map (lambda (def) (Def-name def)) (ProgramDefs-def* p))])
+	(letrec ([reveal-functions*
+			   (lambda (expr)
+				 (match expr
+						[(or (? Bool?) (? Int?) (Prim 'read '())) expr]
+						[(Var v) (let ([f* (member v fs)]) (if  f* (FunRef v) expr))]
+						[(HasType e t) (HasType (reveal-functions* e) t)]
+						[(Let x e body) (Let x (reveal-functions* e) (reveal-functions* body))]
+						[(If e1 e2 e3) (If (reveal-functions* e1) (reveal-functions* e2) (reveal-functions* e3))]
+						[(Prim op es) (Prim op (map reveal-functions* es))]
+						[(Apply f args) (Apply (reveal-functions* f) (map reveal-functions* args))]))])
+	  (match p
+			 [(? Program?) p]
+			 [(? ProgramDefs?) (map-program-def-body reveal-functions* p)]))))
+						
+; R4 -> R4
+(define (limit-functions p)
+  (define arg-limit (vector-length arg-registers))
+  (define (limit-Def def)
+	(match-let ([(Def fn ps rt info expr) def])
+			   (let* ([param-tails (if (> (length ps) arg-limit) 
+									   (list-tail ps (- arg-limit 1))
+									   '())]
+					  [vec-param (gensym 'auto-vec-param)])
+				 (letrec ([subst 
+							(lambda (expr)
+							  (match expr
+									 [(or (? Bool?) (? Int?) (? FunRef?)) expr]
+									 [(Var v)
+									  (let ([idx (index-where param-tails (lambda (ts) (eq? (car ts) v)))])
+										(if idx
+											(Prim 'vector-ref (list (Var vec-param) (Int idx)))
+											expr))]
+									 [(HasType e t) (HasType (subst e) t)]
+									 [(Let x e body) (Let x (subst e) (subst body))]
+									 [(If e1 e2 e3) (If (subst e1) (subst e2) (subst e3))]
+									 [(Prim op rands) (Prim op (map subst rands))]
+									 [(Apply f args) (Apply (subst f) 
+															(if (> (length args) arg-limit)
+																(append (map subst (take args (- arg-limit 1)))
+																		`(,(Prim 'vector (map subst (list-tail args (- arg-limit 1))))))
+																(map subst args)))]))])
+				   (Def fn 
+						(if (> (length ps) arg-limit)
+							(append (take ps (- arg-limit 1)) 
+									`((,vec-param : ,(cons 'Vector (map last param-tails)))))
+							ps)
+						rt
+						info
+						(subst expr))))))
+  (match p
+		 [(? Program?) p]
+		 [(ProgramDefs info defs) (ProgramDefs info (map limit-Def defs))]))
+
 
 (define (expose-allocation p)
   (define (calc-vec-bytes-needed ts)
