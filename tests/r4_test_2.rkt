@@ -10,8 +10,8 @@
 
 
 (define (zip-with [f : (Integer Integer -> Integer)]
-				  [vec1 : (Vector Integer Integer Integer)]
-				  [vec2 : (Vector Integer Integer Integer)])
+				  [vec1 : (Vector Integer Integer Integer Integer)]
+				  [vec2 : (Vector Integer Integer Integer Integer)])
   : (Vector Integer Integer Integer Integer)
   (vector (f (vector-ref vec1 0) (vector-ref vec2 0))
 		  (f (vector-ref vec1 1) (vector-ref vec2 1))
@@ -21,4 +21,7 @@
 
 (define (add x y) (+ x y))
 
-(zip-with add (dive 1 2 3 4 5 6 7 8))
+(let ([vec (zip-with add (dive 1 2 3 4 5 6 7 8))])
+  (let ([x (add (vector-ref vec 0) (vector-ref vec 1))])
+	(let ([y (add (vector-ref vec 2) (vector-ref vec 3))])
+	  (add x y))))

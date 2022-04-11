@@ -97,8 +97,7 @@
   (define (uniquify-exp env)
 	(lambda (e)
 	  (match e
-			 [(Var x)
-			  (Var (lookup x env))]
+			 [(Var x) (Var (lookup x env))]
 			 [(Int n) e]
 			 [(Bool b) e]
 			 [(HasType e t) (HasType ((uniquify-exp env) e) t)]
@@ -111,11 +110,22 @@
 			 [(Prim op es) (Prim op (map (uniquify-exp env) es))]
 			 [(Apply f args) 
 			  (let ([uniq (uniquify-exp env)]) 
-				(Apply (uniq f) (uniq args)))])))
+				(Apply (uniq f) (map uniq args)))])))
   (match p
-		 [(Program info body) (Program info (uniquify-exp body))]
-		 [(? ProgramDefs?)
-		  (map-program-def-body (lambda (body) ((uniquify-exp '()) body)) p)]))
+		 [(Program info body) (Program info ((uniquify-exp '()) body))]
+		 [(ProgramDefs info defs)
+		  (let ([global-env (foldl (lambda (def env) (extend-env env (Def-name def) (Def-name def))) '() defs)])
+			(ProgramDefs info 
+						 (for/list ([def (in-list defs)])
+								   (match-let ([(Def fn ps rt info body) def])
+											  (let ([init-env 
+													  (foldl 
+														(lambda (param env) 
+														  (let ([var (if (pair? param) (car param) param)])
+															(extend-env env var var))) 
+														global-env 
+														ps)])
+												(Def fn ps rt info ((uniquify-exp init-env) body)))))))])) 
 
 
 ;; R4 -> R4
@@ -228,28 +238,36 @@
 																				  
 
 			
-;; remove-complex-opera* : R3 -> R3
+;; remove-complex-opera* : R4 -> R4
 (define (remove-complex-opera* p)
+  (define (nested-let es rand-acc inner-most)
+		   (if (null? es)
+			   (inner-most rand-acc)
+			   (let ([e (car es)])
+				 (if (atm? e)
+					 (nested-let (cdr es) (cons e rand-acc) inner-most)
+					 (let ([v (gensym 'tmp)])
+					   (Let v (rco-expr e) (nested-let (cdr es) (cons (Var v) rand-acc) inner-most)))))))
+
   (define (rco-atm expr)
 	(match expr
-		[(Prim op es)
-		 (let nested-let ([es* es] [rand-acc '()])
-		   (if (null? es*)
-			   (Prim op (reverse rand-acc))
-			   (let ([e (car es*)])
-				 (if (atm? e)
-					 (nested-let (cdr es*) (cons e rand-acc))
-					 (let ([v (gensym 'tmp)])
-					   (Let v (rco-expr e) (nested-let (cdr es*) (cons (Var v) rand-acc))))))))]))
+		[(Prim op es) (nested-let es '() (lambda (acc) (Prim op (reverse acc))))]
+		[(Apply f args) 
+		 (nested-let (cons f args) '() (lambda (acc) 
+										 (let ([r-acc (reverse acc)])
+										   (Apply (car r-acc) (cdr acc)))))]))
 
   (define (rco-expr expr)
 	(match expr
 		[(If e1 e2 e3) (If (rco-expr e1) (rco-expr e2) (rco-expr e3))] 
 		[(Let v e b) (Let v (rco-expr e) (rco-expr b))]
 		[(Prim op es) (rco-atm expr)]
+		[(Apply f args) (rco-atm expr)] 
 		[_ expr]))
-  (match-let ([(Program info expr) p])
-	(Program info (rco-expr expr))))
+  (match p
+		 [(Program info expr) (Program info (rco-expr expr))]
+		 [(? ProgramDefs?) (map-program-def-body rco-expr p)]))
+
 
 ;; explicate-control : R1 -> C0
 (define (explicate-control p)
