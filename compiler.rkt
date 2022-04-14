@@ -87,30 +87,32 @@
 		   [(ProgramDefsExp info defs expr) 
 			(ProgramDefs info (append defs `(,(Def 'main '() 'Integer '() (shrink-exp expr)))))])))
 
-(define (map-program-def-body f p)
+(define (map-program-def f p)
   (match-let ([(ProgramDefs info defs) p])
-			 (ProgramDefs info (for/list ([def (in-list defs)])
-										 (match-let ([(Def fn ps rt info e) def])
-													(Def fn ps rt info (f e)))))))
+			 (ProgramDefs info (map f defs))))
+
+(define (map-program-def-body f p)
+  (map-program-def (lambda (def) 
+					 (match-let ([(Def fn ps rt info body) def])
+								(Def fn ps rt info (f body))))
+				   p))
+
 ;; uniquify : R4 -> R4
 (define (uniquify p)
   (define (uniquify-exp env)
 	(lambda (e)
-	  (match e
-			 [(Var x) (Var (lookup x env))]
-			 [(Int n) e]
-			 [(Bool b) e]
-			 [(HasType e t) (HasType ((uniquify-exp env) e) t)]
-			 [(Let x e body)
-			  (let ([x* (gensym x)])
-				(Let x* ((uniquify-exp env) e) ((uniquify-exp (extend-env env x x*)) body)))]
-			 [(If e1 e2 e3)
-			  (let ([uniq (uniquify-exp env)]) 
-				(If (uniq e1) (uniq e2) (uniq e3)))]
-			 [(Prim op es) (Prim op (map (uniquify-exp env) es))]
-			 [(Apply f args) 
-			  (let ([uniq (uniquify-exp env)]) 
-				(Apply (uniq f) (map uniq args)))])))
+	  (let ([uniq (uniquify-exp env)])
+		(match e
+			   [(Var x) (Var (lookup x env))]
+			   [(Int n) e]
+			   [(Bool b) e]
+			   [(HasType e t) (HasType (uniq e) t)]
+			   [(Let x e body)
+				(let ([x* (gensym x)])
+				  (Let x* (uniq e) ((uniquify-exp (extend-env env x x*)) body)))]
+			   [(If e1 e2 e3) (If (uniq e1) (uniq e2) (uniq e3))]
+			   [(Prim op es) (Prim op (map uniq es))]
+			   [(Apply f args) (Apply (uniq f) (map uniq args))]))))
   (match p
 		 [(Program info body) (Program info ((uniquify-exp '()) body))]
 		 [(ProgramDefs info defs)
@@ -255,7 +257,7 @@
 		[(Apply f args) 
 		 (nested-let (cons f args) '() (lambda (acc) 
 										 (let ([r-acc (reverse acc)])
-										   (Apply (car r-acc) (cdr acc)))))]))
+										   (Apply (car r-acc) (cdr r-acc)))))]))
 
   (define (rco-expr expr)
 	(match expr
@@ -269,54 +271,65 @@
 		 [(? ProgramDefs?) (map-program-def-body rco-expr p)]))
 
 
-;; explicate-control : R1 -> C0
+;; explicate-control : R4 -> C3
 (define (explicate-control p)
-  (let* ([CFG (list)]
-		 [add-CFG
-		   (lambda (block [label-str ""])
-			 (if (Goto? block)
-				 block
-				 (let ([label (if (equal? label-str "") (gensym 'block) (string->symbol label-str))])
-				   (set! CFG (cons (cons label block) CFG))
-				   (Goto label))))]
-		 [lz-add-CFG
-		   (lambda (block [label-str ""])
-			 (delay (add-CFG block label-str)))])
-	(letrec
-	  ([explicate-assign
-		 (lambda (var expr acc)
-		   (match expr
-				  [(Let v e body) (explicate-assign v e (explicate-assign var body acc))]
-				  [(If pred thn els)
-				   (let ([acc-label (add-CFG acc)])
-					 (explicate-pred pred  
-									 (lz-add-CFG (explicate-assign var thn acc-label))
-									 (lz-add-CFG (explicate-assign var els acc-label))))]
-				  [other (Seq (Assign (Var var) expr) acc)]))]
+  (define (explicate-control-expr expr-body fname)
+	(let* ([CFG (list)]
+		   [add-CFG
+			 (lambda (block [label-str ""])
+			   (if (Goto? block)
+				   block
+				   (let ([label (if (equal? label-str "") (gensym 'block) (string->symbol label-str))])
+					 (set! CFG (cons (cons label block) CFG))
+					 (Goto label))))]
+		   [lz-add-CFG
+			 (lambda (block [label-str ""])
+			   (delay (add-CFG block label-str)))])
+	  (letrec
+		([explicate-assign
+		   (lambda (var expr acc)
+			 (match expr
+					[(Let v e body) (explicate-assign v e (explicate-assign var body acc))]
+					[(If pred thn els)
+					 (let ([acc-label (add-CFG acc)])
+					   (explicate-pred pred  
+									   (lz-add-CFG (explicate-assign var thn acc-label))
+									   (lz-add-CFG (explicate-assign var els acc-label))))]
+					[(Apply f args) (Seq (Assign (Var var) (Call f args)) acc)]
+					[other (Seq (Assign (Var var) expr) acc)]))]
 
-	   [explicate-pred
-		 (lambda (pred lz-thn lz-els)
-		   (match pred
-				  [(Bool #t)  (force lz-thn)]
-				  [(Bool #f)  (force lz-els)]
-				  [(Var b) (IfStmt (Prim 'eq? `(,pred ,(Bool #t))) (force lz-thn) (force lz-els))]
-				  [(Prim (or 'eq? '<) rands) (IfStmt pred (force lz-thn) (force lz-els))]
-				  [(Prim 'not `(,pred*)) (explicate-pred pred* lz-els lz-thn)]
-				  [(Let v e body) (explicate-assign v e (explicate-pred body lz-thn lz-els))]
-				  [(If pred* thn* els*) 
-				   (explicate-pred pred* 
-								   (lz-add-CFG (explicate-pred thn* lz-thn lz-els)) 
-								   (lz-add-CFG (explicate-pred els* lz-thn lz-els)))]))]
+		 [explicate-pred
+		   (lambda (pred lz-thn lz-els)
+			 (match pred
+					[(Bool #t)  (force lz-thn)]
+					[(Bool #f)  (force lz-els)]
+					[(Var b) (IfStmt (Prim 'eq? `(,pred ,(Bool #t))) (force lz-thn) (force lz-els))]
+					[(Apply f args) 
+					 (let ([v (gensym 'auto-if-call)]) 
+					   (explicate-assign v (Call f args) (explicate-pred (Var v) lz-thn lz-els)))]
+					[(Prim (or 'eq? '<) rands) (IfStmt pred (force lz-thn) (force lz-els))]
+					[(Prim 'not `(,pred*)) (explicate-pred pred* lz-els lz-thn)]
+					[(Let v e body) (explicate-assign v e (explicate-pred body lz-thn lz-els))]
+					[(If pred* thn* els*) 
+					 (explicate-pred pred* 
+									 (lz-add-CFG (explicate-pred thn* lz-thn lz-els)) 
+									 (lz-add-CFG (explicate-pred els* lz-thn lz-els)))]))]
 
-	   [explicate-tail
-		 (lambda (expr)
-		   (match expr
-				  [(Let var e body) (explicate-assign var e (explicate-tail body))]
-				  [(If pred thn els) (explicate-pred pred (lz-add-CFG (explicate-tail thn)) (lz-add-CFG (explicate-tail els)))]
-				  [other (Return expr)]))])
+		 [explicate-tail
+		   (lambda (expr)
+			 (match expr
+					[(Let var e body) (explicate-assign var e (explicate-tail body))]
+					[(If pred thn els) (explicate-pred pred (lz-add-CFG (explicate-tail thn)) (lz-add-CFG (explicate-tail els)))]
+					[(Apply f args) (TailCall f args)]
+					[other (Return expr)]))])
+	  (begin (add-CFG (explicate-tail expr-body) (~a fname "start")) CFG))))
+
 	  (match p
-			 [(Program info e)
-			  (CProgram info (begin (add-CFG (explicate-tail e) "start") CFG))]))))
+			 [(Program info e) (CProgram info (explicate-control-expr e ""))]
+			 [(ProgramDefs info defs) 
+			  (ProgramDefs info (for/list ([def (in-list defs)])
+										  (match-let ([(Def fn ps rt info body) def])
+													 (Def fn ps rt info (explicate-control-expr body fn)))))]))
 
        
 

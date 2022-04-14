@@ -6,4 +6,4 @@
 (define (add1 [x : Integer]) : Integer
   (+ x 1))
 
-(vector-ref (map-vec add1 (vector 0 41)))
+(vector-ref (map-vec add1 (vector 0 41)) 0)

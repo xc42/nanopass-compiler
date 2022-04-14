@@ -19,9 +19,10 @@
 		  (f (vector-ref vec1 3) (vector-ref vec2 3))))
 
 
-(define (add x y) (+ x y))
+(define (add [x : Integer] [y : Integer]) : Integer (+ x y))
 
-(let ([vec (zip-with add (dive 1 2 3 4 5 6 7 8))])
-  (let ([x (add (vector-ref vec 0) (vector-ref vec 1))])
-	(let ([y (add (vector-ref vec 2) (vector-ref vec 3))])
-	  (add x y))))
+(let ([vv (dive 1 2 3 4 5 6 7 8)])
+  (let ([vec (zip-with add (vector-ref vv 0) (vector-ref vv 1))])
+	(let ([x (add (vector-ref vec 0) (vector-ref vec 1))])
+	  (let ([y (add (vector-ref vec 2) (vector-ref vec 3))])
+		(add x y)))))
