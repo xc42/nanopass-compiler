@@ -3,7 +3,7 @@
 (require racket/fixnum)
 (require "interp-Rint.rkt")
 (require "utilities.rkt")
-(require "type-check-Cvec.rkt")
+(require "type-check-Cfun.rkt")
 (require (prefix-in runtime-config:: "runtime-config.rkt"))
 (require graph)
 (require racket/promise)
@@ -210,6 +210,7 @@
 		   [(Prim op es) (Prim op (map expose-allocation-expr es))]
 		   [(If pred thn els) (If (expose-allocation-expr pred) (expose-allocation-expr thn) (expose-allocation-expr els))]
 		   [(Let v e body) (Let v (expose-allocation-expr e) (expose-allocation-expr body))]
+		   [(Apply f args) (Apply f (map expose-allocation-expr args))]
 		   [(HasType (Prim 'vector es) ts)
 			(let* ([vs (map (lambda (x) (gensym 'vec-init)) es)]
 				   [bytes (calc-vec-bytes-needed (cdr ts))]
@@ -235,8 +236,9 @@
 			  (nested-let-expr vs (map expose-allocation-expr es) alloc-body))]
 		   [atm-expr atm-expr]))
 
-  (match-let ([(Program info e) p])
-			 (Program info (expose-allocation-expr e))))
+  (match p
+		 [(Program info e) (Program info (expose-allocation-expr e))]
+		 [(? ProgramDefs?) (map-program-def-body expose-allocation-expr p)]))
 																				  
 
 			
@@ -357,7 +359,7 @@
 	  ((mask . << . 7) . || . ((len . << . 1) . || . 0))))
 				  
 				
-  (define (trans-C0-assign stmt)
+  (define (trans-assign stmt)
 	(match-let ([(Assign dst expr) stmt])
 	   (match expr
 		 [(Int n) `(,(Instr 'movq (list (Imm n) dst)))]
@@ -365,6 +367,12 @@
 		 [(Var v) `(,(Instr 'movq (list (Var v) dst)))]
 		 [(GlobalValue var) `(,(Instr 'movq (list (Global var) dst)))]
 		 [(Void) `(,(Instr 'movq (list (Imm 0) dst)))]
+		 [(FunRef f) `(,(Instr 'leaq (list expr dst)))]
+		 [(Call f args) `(,@(for/list ([arg args]
+									   [r arg-registers])
+									  (Instr 'movq (list arg r)))
+						   ,(IndirectCallq f (length args))
+						   ,(Instr 'movq (list (Reg 'rax) dst)))]
 
 		 [(Prim 'read '()) `(,(Callq 'read_int 0) ,(Instr 'movq (list (Reg 'rax) dst)))]
 		 [(Prim 'not `(,e)) 
@@ -423,7 +431,11 @@
   (define (trans-stmts stmts)
 	(match stmts
 		   [(Goto label) `(,(Jmp label))]
-		   [(Seq s1 tail) (append (trans-C0-assign s1) (trans-stmts tail))]
+		   [(Seq s1 tail) (append (trans-assign s1) (trans-stmts tail))]
+		   [(TailCall f args) `(,@(for/list ([arg args]
+											 [r arg-registers])
+											(Instr 'movq (list arg r)))
+								 ,(TailJmp f (length args)))]
 		   [(IfStmt pred thn els)
 			(match-let ([(Prim op `(,e1 ,e2))  pred])
 					   (let ([v1 (to-X86-val e1)]
@@ -451,17 +463,26 @@
 									  `(,(Instr 'movq (list e (Reg 'rax))) ,(Instr 'negq (list (Reg 'rax)))))]
 								 [(Int n) `(,(Instr 'movq (list (Imm n) (Reg 'rax))))]
 								 [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
-  (match (type-check-Cvec p)
-	[(CProgram info (list lab-sts ...))
-	 (X86Program (cons 
-				   (cons 'num-root-spills  ; for interp-x86-2
-						 (length (filter (lambda (ts) (and (pair? ts) (eq? 'Vector (car ts)))) (assoc 'locals-types info))))
-				   info)
-				 (map 
-				   (lambda (ls)
-					 (let ([label (car ls)] [stmts (cdr ls)])
-					   (cons label (Block '() (trans-stmts stmts)))))
-				   lab-sts))]))
+
+  (define (trans-func info CFG)
+	(values (cons 
+			  (cons 'num-root-spills  ; for interp-x86-2
+					(length (filter (lambda (ts) (and (pair? ts) (eq? 'Vector (car ts)))) (assoc 'locals-types info))))
+			  info)
+			(for/list ([bb CFG])
+					  (let ([label (car bb)] [stmts (cdr bb)])
+						(cons label (Block '() (trans-stmts stmts)))))))
+
+  (match (type-check-Cfun p)
+	[(CProgram info CFG)
+	 (let-values ([(info* lab-blks) (trans-func info CFG)])
+	   (X86Program info* lab-blks))]
+	[(ProgramDefs info defs)
+	 (ProgramDefs info 
+				  (for/list ([def defs])
+						(match-let ([(Def fn ps rt info body) def])
+								   (let-values ([(info* lab-blks) (trans-func info body)])
+									 (Def fn ps rt info* lab-blks)))))]))
 
 (define (remove-jumps p)
   (define (occur-once xs)
@@ -472,40 +493,40 @@
 		  (if (set-member? once x)
 			  (set-remove once x)
 			  (set-add once x)))))
-  (let* ([lab-blks (X86Program-CFG p)]
-		 [scan-block
-		   (lambda (lab-blk)
-			 (for/fold ([jpif-ref (set)]
-						[jp-ref '()])
-					   ([stmt (Block-instr* (cdr lab-blk))] #:when (or (JmpIf? stmt) (Jmp? stmt)))
-					   (if (Jmp? stmt)
-						   (values jpif-ref (cons (Jmp-target stmt) jp-ref))
-						   (values (set-add jpif-ref (JmpIf-target stmt)) jp-ref))))]
-		 [tail-labels
-		   (for/fold ([acc-jpif-ref (set)]
-					  [acc-jp-ref '()]
-					  #:result (set-subtract (occur-once acc-jp-ref) acc-jpif-ref))
-					 ([lab-blk lab-blks])
-					 (let-values ([(jpif-ref jp-ref) (scan-block lab-blk)])
-					   (values (set-union jpif-ref acc-jpif-ref) (append jp-ref acc-jp-ref))))])
-	(letrec
-	  ([trans-stmts
-		 (lambda (stmts)
-		   (foldr 
-			 (lambda (instr acc)
-			   (match instr
-					  [(Jmp label) (if (set-member? tail-labels label)
-									   (append (trans-stmts (Block-instr* (cdr (assoc label lab-blks)))) acc)
-									   (cons instr acc))]
-					  [_ (cons instr acc)]))
-			 '()
-			 stmts))])
-	  (match-let ([(X86Program info lab-blks) p])
-				 (X86Program info
-							 (for/list ([lab-blk lab-blks]
-										#:unless (set-member? tail-labels (car lab-blk)))
-									   (match-let ([(Block binfo stmts) (cdr lab-blk)])
-												  (cons (car lab-blk) (Block binfo (trans-stmts stmts))))))))))
+  (define (remove-for-lab-blks lab-blks)
+	(let* ([scan-block
+			 (lambda (lab-blk)
+			   (for/fold ([jpif-ref (set)]
+						  [jp-ref '()])
+						 ([stmt (Block-instr* (cdr lab-blk))] #:when (or (JmpIf? stmt) (Jmp? stmt)))
+						 (if (Jmp? stmt)
+							 (values jpif-ref (cons (Jmp-target stmt) jp-ref))
+							 (values (set-add jpif-ref (JmpIf-target stmt)) jp-ref))))]
+		   [tail-labels
+			 (for/fold ([acc-jpif-ref (set)]
+						[acc-jp-ref '()]
+						#:result (set-subtract (occur-once acc-jp-ref) acc-jpif-ref))
+					   ([lab-blk lab-blks])
+					   (let-values ([(jpif-ref jp-ref) (scan-block lab-blk)])
+						 (values (set-union jpif-ref acc-jpif-ref) (append jp-ref acc-jp-ref))))])
+	  (letrec ([trans-stmts 
+				 (lambda (stmts)
+				   (foldr 
+					 (lambda (instr acc)
+					   (match instr
+							  [(Jmp label) (if (set-member? tail-labels label)
+											   (append (trans-stmts (Block-instr* (cdr (assoc label lab-blks)))) acc)
+											   (cons instr acc))]
+							  [_ (cons instr acc)]))
+					 '()
+					 stmts))])
+		(for/list ([lab-blk lab-blks]
+				   #:unless (set-member? tail-labels (car lab-blk)))
+				  (match-let ([(Block binfo stmts) (cdr lab-blk)])
+							 (cons (car lab-blk) (Block binfo (trans-stmts stmts))))))))
+  (match p
+		 [(X86Program info lab-blks) (X86Program info (remove-for-lab-blks lab-blks))]
+		 [(? ProgramDefs?) (map-program-def-body remove-for-lab-blks p)]))
 
 					 
 
