@@ -358,7 +358,11 @@
 		  [|| bitwise-ior])
 	  ((mask . << . 7) . || . ((len . << . 1) . || . 0))))
 				  
-				
+  (define (push-args args)
+	(for/list ([arg args]
+			   [r arg-registers])
+			  (Instr 'movq (list arg (Reg r)))))
+
   (define (trans-assign stmt)
 	(match-let ([(Assign dst expr) stmt])
 	   (match expr
@@ -368,9 +372,7 @@
 		 [(GlobalValue var) `(,(Instr 'movq (list (Global var) dst)))]
 		 [(Void) `(,(Instr 'movq (list (Imm 0) dst)))]
 		 [(FunRef f) `(,(Instr 'leaq (list expr dst)))]
-		 [(Call f args) `(,@(for/list ([arg args]
-									   [r arg-registers])
-									  (Instr 'movq (list arg r)))
+		 [(Call f args) `(,@(push-args args)
 						   ,(IndirectCallq f (length args))
 						   ,(Instr 'movq (list (Reg 'rax) dst)))]
 
@@ -432,9 +434,7 @@
 	(match stmts
 		   [(Goto label) `(,(Jmp label))]
 		   [(Seq s1 tail) (append (trans-assign s1) (trans-stmts tail))]
-		   [(TailCall f args) `(,@(for/list ([arg args]
-											 [r arg-registers])
-											(Instr 'movq (list arg r)))
+		   [(TailCall f args) `(,@(push-args args)
 								 ,(TailJmp f (length args)))]
 		   [(IfStmt pred thn els)
 			(match-let ([(Prim op `(,e1 ,e2))  pred])
@@ -464,25 +464,27 @@
 								 [(Int n) `(,(Instr 'movq (list (Imm n) (Reg 'rax))))]
 								 [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
 
-  (define (trans-func info CFG)
-	(values (cons 
-			  (cons 'num-root-spills  ; for interp-x86-2
-					(length (filter (lambda (ts) (and (pair? ts) (eq? 'Vector (car ts)))) (assoc 'locals-types info))))
-			  info)
-			(for/list ([bb CFG])
-					  (let ([label (car bb)] [stmts (cdr bb)])
-						(cons label (Block '() (trans-stmts stmts)))))))
+  (define (trans-func CFG)
+	(for/list ([bb CFG])
+			  (let ([label (car bb)] [stmts (cdr bb)])
+				(cons label (Block '() (trans-stmts stmts))))))
 
   (match (type-check-Cfun p)
-	[(CProgram info CFG)
-	 (let-values ([(info* lab-blks) (trans-func info CFG)])
-	   (X86Program info* lab-blks))]
+	[(CProgram info CFG) (X86Program info (trans-func CFG))]
 	[(ProgramDefs info defs)
 	 (ProgramDefs info 
 				  (for/list ([def defs])
 						(match-let ([(Def fn ps rt info body) def])
-								   (let-values ([(info* lab-blks) (trans-func info body)])
-									 (Def fn ps rt info* lab-blks)))))]))
+									 (Def fn ps rt 
+										  (append 
+											(list 
+											  (cons 'num-params (length ps))
+											  (cons 'name fn)
+											  (cons 'num-root-spills  ; for interp-x86-2
+													(length (filter (lambda (ts) (and (pair? ts) (eq? 'Vector (car ts)))) 
+																	(assoc 'locals-types info)))))
+											info) 
+										  (trans-func body)))))]))
 
 (define (remove-jumps p)
   (define (occur-once xs)
