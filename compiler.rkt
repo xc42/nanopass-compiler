@@ -3,6 +3,7 @@
 (require racket/fixnum)
 (require "interp-Rint.rkt")
 (require "utilities.rkt")
+(require "type-check-Rfun.rkt")
 (require "type-check-Cfun.rkt")
 (require (prefix-in runtime-config:: "runtime-config.rkt"))
 (require graph)
@@ -150,6 +151,17 @@
 ; R4 -> R4
 (define (limit-functions p)
   (define arg-limit (vector-length arg-registers))
+
+  (define (type-of-args args)
+	(let ([type-check-class (new type-check-Rfun-class)])
+	  (for/list ([arg args])
+				(match arg
+					   [(? HasType?) (HasType-type arg)]
+					   [else 
+						 (let-values ([(e t) (send type-check-class type-check-exp arg)])
+						   t)]))))
+		  
+	
   (define (limit-Def def)
 	(match-let ([(Def fn ps rt info expr) def])
 			   (let* ([param-tails (if (> (length ps) arg-limit) 
@@ -157,23 +169,29 @@
 									   '())]
 					  [vec-param (gensym 'auto-vec-param)])
 				 (letrec ([subst 
-							(lambda (expr)
-							  (match expr
-									 [(or (? Bool?) (? Int?) (? FunRef?)) expr]
-									 [(Var v)
-									  (let ([idx (index-where param-tails (lambda (ts) (eq? (car ts) v)))])
-										(if idx
-											(Prim 'vector-ref (list (Var vec-param) (Int idx)))
-											expr))]
-									 [(HasType e t) (HasType (subst e) t)]
-									 [(Let x e body) (Let x (subst e) (subst body))]
-									 [(If e1 e2 e3) (If (subst e1) (subst e2) (subst e3))]
-									 [(Prim op rands) (Prim op (map subst rands))]
-									 [(Apply f args) (Apply (subst f) 
-															(if (> (length args) arg-limit)
-																(append (map subst (take args (- arg-limit 1)))
-																		`(,(Prim 'vector (map subst (list-tail args (- arg-limit 1))))))
-																(map subst args)))]))])
+							(lambda (targets)
+							  (lambda (expr)
+								(match expr
+									   [(or (? Bool?) (? Int?) (? FunRef?)) expr]
+									   [(Var v)
+										(let ([idx (index-where targets (lambda (ts) (eq? (car ts) v)))])
+										  (if idx
+											  (Prim 'vector-ref (list (Var vec-param) (Int idx)))
+											  expr))]
+									   [(HasType e t) (HasType ((subst targets) e) t)]
+									   [(Let x e body) (Let x ((subst targets) e) ((subst (remove x targets)) body))]
+									   [(If e1 e2 e3) (If ((subst targets) e1) ((subst targets) e2) ((subst targets) e3))]
+									   [(Prim op rands) (Prim op (map (subst targets) rands))]
+									   [(Apply f args) 
+										(Apply 
+										  ((subst targets) f) 
+										  (if (> (length args) arg-limit)
+											  (let ([rest-args (list-tail args (- arg-limit 1))])
+												`(,@(map (subst targets) (take args (- arg-limit 1)))
+												  ,(HasType 
+													 (Prim 'vector (map (subst targets) rest-args))
+													`(Vector ,@(type-of-args rest-args)))))
+												(map (subst targets) args)))])))])
 				   (Def fn 
 						(if (> (length ps) arg-limit)
 							(append (take ps (- arg-limit 1)) 
@@ -181,7 +199,7 @@
 							ps)
 						rt
 						info
-						(subst expr))))))
+						((subst param-tails) expr))))))
   (match p
 		 [(? Program?) p]
 		 [(ProgramDefs info defs) (ProgramDefs info (map limit-Def defs))]))
@@ -464,27 +482,41 @@
 								 [(Int n) `(,(Instr 'movq (list (Imm n) (Reg 'rax))))]
 								 [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
 
-  (define (trans-func CFG)
-	(for/list ([bb CFG])
-			  (let ([label (car bb)] [stmts (cdr bb)])
-				(cons label (Block '() (trans-stmts stmts))))))
+  (define (trans-def def)
+	(match-let ([(Def fn ps rt info CFG) def])
+			   (let ([info^
+					   (append 
+						 (list 
+						   (cons 'num-params (length ps))
+						   (cons 'name fn)
+						   (cons 'num-root-spills  ; for interp-x86-2
+								 (length (filter (lambda (ts) (and (pair? ts) (eq? 'Vector (car ts)))) 
+												 (assoc 'locals-types info)))))
+						 info)]
+					 [CFG^ 
+					   (for/list ([bb CFG])
+								 (let ([label (car bb)] 
+									   [stmts (cdr bb)]
+									   [start (~a fn 'start)]
+									   [arg-pass-stmts
+										 (for/list ([p ps]
+													[r arg-registers])
+												   (Instr 'movq `(,(Reg r) ,(Var (car p)))))])
+								   (cons label 
+										 (if (eq? label start)
+											 (Block '() (trans-stmts stmts))
+											 (Block '() (append arg-pass-stmts (trans-stmts stmts)))))))])
+				 (Def fn ps rt info^ CFG^))))
+
 
   (match (type-check-Cfun p)
-	[(CProgram info CFG) (X86Program info (trans-func CFG))]
-	[(ProgramDefs info defs)
-	 (ProgramDefs info 
-				  (for/list ([def defs])
-						(match-let ([(Def fn ps rt info body) def])
-									 (Def fn ps rt 
-										  (append 
-											(list 
-											  (cons 'num-params (length ps))
-											  (cons 'name fn)
-											  (cons 'num-root-spills  ; for interp-x86-2
-													(length (filter (lambda (ts) (and (pair? ts) (eq? 'Vector (car ts)))) 
-																	(assoc 'locals-types info)))))
-											info) 
-										  (trans-func body)))))]))
+	[(CProgram info CFG) 
+	 (X86Program info 
+				 (for/list ([bb CFG]) 
+						   (cons (car bb) 
+								 (Block '() (trans-stmts (cdr bb))))))]
+	[(ProgramDefs info defs) (ProgramDefs info (map trans-def defs))]))
+
 
 (define (remove-jumps p)
   (define (occur-once xs)

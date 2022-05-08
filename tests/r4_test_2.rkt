@@ -5,7 +5,7 @@
 			  [v5 : Integer]
 			  [v6 : Integer]
 			  [v7 : Integer]
-			  [v8 : Integer]): (Vector (Vector Integer Integer Integer Integer) (Vector Integer Integer Integer Integer))
+			  [v8 : Integer]) : (Vector (Vector Integer Integer Integer Integer) (Vector Integer Integer Integer Integer))
   (vector (vector v1 v2 v3 v4) (vector v5 v6 v7 v8)))
 
 
