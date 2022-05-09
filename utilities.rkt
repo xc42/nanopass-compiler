@@ -165,7 +165,7 @@ Changelog:
      (unless (exact-nonnegative-integer? d) 
        (error 'debug-state "expected nonnegative-integer in ~a" d))
      d)))
-(debug-level 1)
+(debug-level 0)
 
 ;; Check to see if debug state is at least some level
 (define (at-debug-level? n)

@@ -55,6 +55,15 @@
 ;; HW1 Passes
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(define (map-program-def f p)
+  (match-let ([(ProgramDefs info defs) p])
+			 (ProgramDefs info (map f defs))))
+
+(define (map-program-def-body f p)
+  (map-program-def (lambda (def) 
+					 (match-let ([(Def fn ps rt info body) def])
+								(Def fn ps rt info (f body))))
+				   p))
 
 ;; R4 -> R4
 (define (shrink p)
@@ -64,10 +73,10 @@
 		 (match e
 				[(Prim op `(,e1 ,es ...))
 				 (let* ([e1 (shrink-exp e1)]
-					   [es (map shrink-exp es)]
-					   [new-es (cons e1 es)]
-					   [T (Bool #t)]
-					   [F (Bool #f)])
+						[es (map shrink-exp es)]
+						[new-es (cons e1 es)]
+						[T (Bool #t)]
+						[F (Bool #f)])
 				   (match op
 						  ['- (if (eq? es '()) 
 								  (Prim op `(,e1))
@@ -86,17 +95,12 @@
 	(match p
 		   [(Program info body) (Program info (shrink-exp body))]
 		   [(ProgramDefsExp info defs expr) 
-			(ProgramDefs info (append defs `(,(Def 'main '() 'Integer '() (shrink-exp expr)))))])))
+			(ProgramDefs info (append
+								(for/list ([def (in-list defs)])
+											(match-let ([(Def fn ps rt info body) def])
+													   (Def fn ps rt info (shrink-exp body))))
+								 `(,(Def 'main '() 'Integer '() (shrink-exp expr)))))])))
 
-(define (map-program-def f p)
-  (match-let ([(ProgramDefs info defs) p])
-			 (ProgramDefs info (map f defs))))
-
-(define (map-program-def-body f p)
-  (map-program-def (lambda (def) 
-					 (match-let ([(Def fn ps rt info body) def])
-								(Def fn ps rt info (f body))))
-				   p))
 
 ;; uniquify : R4 -> R4
 (define (uniquify p)
@@ -152,14 +156,22 @@
 (define (limit-functions p)
   (define arg-limit (vector-length arg-registers))
 
-  (define (type-of-args args)
-	(let ([type-check-class (new type-check-Rfun-class)])
-	  (for/list ([arg args])
-				(match arg
-					   [(? HasType?) (HasType-type arg)]
-					   [else 
-						 (let-values ([(e t) (send type-check-class type-check-exp arg)])
-						   t)]))))
+  ;to pack overflowed args to vector need to know their type
+  (define expose-apply-type-class
+	(class type-check-Rfun-class
+		   (super-new)
+		   (inherit type-check-exp)
+		   (inherit check-type-equal?)
+		   (define/override (type-check-apply env e es)
+						  (let-values ([(e^ ty) ((type-check-exp env) e)]
+									   [(e* ty*) (for/lists (e* ty*) ([e (in-list es)])
+															((type-check-exp env) e))])
+							(match ty
+								   [`(,ty^* ... -> ,rt)
+									 (for ([arg-ty ty*] [param-ty ty^*])
+										  (check-type-equal? arg-ty param-ty (Apply e es)))
+									 (values e^ (map HasType e* ty*) rt)]
+								   [else (error 'type-check "expected a function, not ~a" ty)])))))
 		  
 	
   (define (limit-Def def)
@@ -183,15 +195,16 @@
 									   [(If e1 e2 e3) (If ((subst targets) e1) ((subst targets) e2) ((subst targets) e3))]
 									   [(Prim op rands) (Prim op (map (subst targets) rands))]
 									   [(Apply f args) 
-										(Apply 
-										  ((subst targets) f) 
-										  (if (> (length args) arg-limit)
-											  (let ([rest-args (list-tail args (- arg-limit 1))])
-												`(,@(map (subst targets) (take args (- arg-limit 1)))
-												  ,(HasType 
-													 (Prim 'vector (map (subst targets) rest-args))
-													`(Vector ,@(type-of-args rest-args)))))
-												(map (subst targets) args)))])))])
+										(let ([subst.strip (compose (subst targets) HasType-expr)])
+										  (Apply 
+											((subst targets) f) 
+											(if (> (length args) arg-limit)
+												(let ([rest-args (list-tail args (- arg-limit 1))])
+												  `(,@(map subst.strip (take args (- arg-limit 1)))
+													 ,(HasType 
+														(Prim 'vector (map subst.strip rest-args))
+														`(Vector ,@(map HasType-type rest-args)))))
+												(map subst.strip args))))])))])
 				   (Def fn 
 						(if (> (length ps) arg-limit)
 							(append (take ps (- arg-limit 1)) 
@@ -200,9 +213,11 @@
 						rt
 						info
 						((subst param-tails) expr))))))
-  (match p
-		 [(? Program?) p]
-		 [(ProgramDefs info defs) (ProgramDefs info (map limit-Def defs))]))
+
+  (let ([p^ (send (new expose-apply-type-class) type-check-program p)])
+	(match p^
+		   [(? Program?) p^]
+		   [(ProgramDefs info defs) (ProgramDefs info (map limit-Def defs))])))
 
 
 (define (expose-allocation p)
@@ -379,7 +394,7 @@
   (define (push-args args)
 	(for/list ([arg args]
 			   [r arg-registers])
-			  (Instr 'movq (list arg (Reg r)))))
+			  (Instr 'movq (list (to-X86-val arg) (Reg r)))))
 
   (define (trans-assign stmt)
 	(match-let ([(Assign dst expr) stmt])
@@ -463,15 +478,14 @@
 										  ['< 'l])])
 						 `(,(Instr 'cmpq (list v2 v1)) ,(JmpIf flag (Goto-label thn)) ,(Jmp (Goto-label els)))))]
 		   [(Return expr) (match expr
-								 [(Prim '+ `(,e1 ,e2)) 
-								  (cond
-									[(and (Int? e1) (Int? e2)) 
-									 (match-let ([(Int n1) e1] [(Int n2) e2]) `(,(Instr 'movq (list (Imm (+ n1 n2)) (Reg 'rax)))))]
-									[(Int? e1) (match-let ([(Int n1) e1]) 
-														  `(,(Instr 'movq (list (Imm n1) (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax)))))]
-									[(Int? e2) (match-let ([(Int n2) e2]) 
-														  `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list (Imm n2) (Reg 'rax)))))]
-									[else `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax))))])]
+								 [(Prim '+ `(,(Int n1) ,(Int n2))) 
+								  `(,(Instr 'movq (list (Imm (+ n1 n2)) (Reg 'rax))))]
+								 [(Prim '+ `(,(Int n1) ,e2))
+								  `(,(Instr 'movq (list (Imm n1) (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax))))]
+								 [(Prim '+ `(,e1 ,(Int n2)))
+								  `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list (Imm n2) (Reg 'rax))))]
+								 [(Prim '+ `(,e1 ,e2))
+								  `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax))))]
 								 [(Prim 'vector-ref `(,v ,i))
 								  (list (Instr 'movq `(,v ,(Reg 'r11)))
 										(Instr 'movq `(,(Deref 'r11 (* 8 (+ (Int-value i) 1))) ,(Reg 'rax))))]
