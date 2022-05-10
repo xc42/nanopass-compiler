@@ -98,7 +98,7 @@
 	("remove complex opera*" ,remove-complex-opera* ,interp-Rfun-prime)
 	("explicate control" ,explicate-control ,interp-Cfun)
 	("instruction selection" ,select-instructions ,interp-x86-3)
-	;("remove jumps" ,remove-jumps ,interp-x86-3)
+	("remove jumps" ,remove-jumps ,interp-x86-3)
 	;("allocate register" ,(lambda (p) (allocate-register (build-interference (uncover-live p)))) ,interp-x86-2)
 	;("patch instructions",patch-instructions ,interp-x86-2) 
 	;("print x86" ,print-x86 #f)

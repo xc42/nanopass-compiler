@@ -90,7 +90,7 @@
 				[(Let v e body) (Let v (shrink-exp e) (shrink-exp body))]
 				[(If cnd thn els) (If (shrink-exp cnd) (shrink-exp thn) (shrink-exp els))]
 				[(HasType e t) (HasType (shrink-exp e) t)]
-				[(Apply f args) (Apply (shrink-exp f) (shrink-exp args))]
+				[(Apply f args) (Apply (shrink-exp f) (map shrink-exp args))]
 				[_ e]))])
 	(match p
 		   [(Program info body) (Program info (shrink-exp body))]
@@ -563,7 +563,7 @@
 					 (lambda (instr acc)
 					   (match instr
 							  [(Jmp label) (if (set-member? tail-labels label)
-											   (append (trans-stmts (Block-instr* (cdr (assoc label lab-blks)))) acc)
+											   (append (trans-stmts (Block-instr* (dict-ref lab-blks label))) acc)
 											   (cons instr acc))]
 							  [_ (cons instr acc)]))
 					 '()
@@ -676,59 +676,73 @@
 				 [(Instr 'negq `(,e)) (cons `(,e) `(,e))]
 				 [(Instr 'set `(,c ,arg2)) (cons '() `(,arg2))]
 				 [(Instr 'cmpq rands) (cons rands '())]
-				 [(Callq label arity) (cons (for/list ([x (vector-take arg-registers arity)]) (Reg x)) (for/list ([r caller-save]) (Reg r)))]
+				 [(or (Callq _ arity) (IndirectCallq _ arity))
+				  (cons (for/list ([x (vector-take arg-registers arity)]) (Reg x)) 
+						(for/list ([r caller-save]) (Reg r)))]
+				 [(TailJmp _ arity)  ; TODO is this right?
+				  (cons (for/list ([x (vector-take arg-registers arity)]) (Reg x)) 
+						'())] 
+				 
 				 [_ (error (format "unhandled instr ~a in get-instr-RW-set" instr))])])
-	  (cons (apply set (get-infer-objs (car rw))) (apply set (get-infer-objs (cdr rw))))))
+	  (cons (apply set (get-infer-objs (car rw))) 
+			(apply set (get-infer-objs (cdr rw))))))
 				
 
 ;two ways:  1. calculate CFG and using tsort to get eval order
 ;			2. using lazy eval
 (define (uncover-live p)
-  (match-letrec ([(X86Program info lab-blks) p]
-				 [uncover-one-instr
-				   (lambda (instr acc-live-set)
-					 (let ([live-after (car acc-live-set)])
-					   (match instr
-							  [(Instr 'cmpq rands) 
-							   (for/fold ([lives (set-union live-after (cadr acc-live-set))]) ;;here assume cmp followed by JmpIf and Jmp
-										 ([x (car (get-instr-RW-set instr))])
-										 (set-add lives x))]
-							  [(Jmp label) (car (force (cdr (assoc label lazy-lab-live-sets))))]
-							  [(JmpIf c label) (car (force (cdr (assoc label lazy-lab-live-sets))))]
-							  [(Retq) live-after] ;;TODO
-							  [_ (let ([rw (get-instr-RW-set instr)])
-								   (set-union (set-subtract live-after (cdr rw)) (car rw)))] 
-							  )))]
-				 [uncover-block	
-				   (lambda (stmts) 
-					 (foldr (lambda (instr acc-live-set) (cons (uncover-one-instr instr acc-live-set) acc-live-set))
-							`(,(set))
-							stmts))]
-				 [lazy-lab-live-sets
-				   (map 
-					 (lambda (lab-blk)
-					   (let ([lab (car lab-blk)] 
-							 [blk (cdr lab-blk)])
-					   (cons lab (delay (uncover-block (Block-instr* blk))))))
-					 lab-blks)])
-				(X86Program info
-							(map 
-							  (lambda (lab-blk) 
-								(match-let ([(cons label (Block info stmts)) lab-blk])
-										   (cons label (Block (cons (cons 'live-set (force (cdr (assoc label lazy-lab-live-sets)))) info) stmts))))
-							  lab-blks))))
+  (define (uncover-CFG lab-blks)
+	(letrec ([uncover-one-instr
+			   (lambda (instr acc-live-set)
+				 (let ([live-after (car acc-live-set)])
+				   (match instr
+						  [(Instr 'cmpq rands) 
+						   (for/fold ([lives (set-union live-after (cadr acc-live-set))]) ;;here assume cmp followed by JmpIf and Jmp
+									 ([x (car (get-instr-RW-set instr))])
+									 (set-add lives x))]
+						  [(Jmp label) (car (force (dict-ref lazy-lab-live-sets label)))]
+						  [(JmpIf c label) (car (force (dict-ref lazy-lab-live-sets label)))]
+						  [(Retq) live-after] ;;TODO
+						  [_ (let ([rw (get-instr-RW-set instr)])
+							   (set-union (set-subtract live-after (cdr rw)) (car rw)))] 
+						  )))]
+			 [uncover-block	
+			   (lambda (stmts) 
+				 (foldr (lambda (instr acc-live-set) (cons (uncover-one-instr instr acc-live-set) acc-live-set))
+						`(,(set))
+						stmts))]
+			 [lazy-lab-live-sets
+			   (map 
+				 (lambda (lab-blk)
+				   (let ([lab (car lab-blk)] 
+						 [blk (cdr lab-blk)])
+					 (cons lab (delay (uncover-block (Block-instr* blk))))))
+				 lab-blks)])
+	  (map 
+		(lambda (lab-blk) 
+		  (match-let ([(cons label (Block info stmts)) lab-blk])
+					 (cons label 
+						   (Block 
+							 (cons (cons 'live-set (force (dict-ref lazy-lab-live-sets label))) 
+										info) 
+							 stmts))))
+		lab-blks)))
+  (match p
+		 [(X86Program info lab-blks) (X86Program info (uncover-CFG lab-blks))]
+		 [(? ProgramDefs?) (map-program-def-body uncover-CFG p)]))
+
 
 (define (build-interference p)
   (match-let* ([(X86Program info lab-blks) p]
-			   [loc-ts (assoc 'locals-types info)]
+			   [loc-ts (dict-ref info 'locals-types)]
 			   [infer-G
 				 (foldl 
 				   (lambda (v g) (add-vertex! g (Var v)) g) 
 				   (undirected-graph '()) 
-				   (map car (cdr loc-ts)))])
+				   (map car loc-ts))])
 			  (define (graph-from label)
 				(match-let* ([`(,label . ,(Block binfo instrs)) (assoc label lab-blks)]
-							 [`(live-set . ,live-sets) (assoc 'live-set binfo)]
+							 [live-sets (dict-ref binfo 'live-set)]
 							 [g infer-G])
 							(for ([instr instrs]
 								  [lives (cdr live-sets)])
@@ -753,7 +767,7 @@
 														   (lambda (x)
 															 (let ([is-vec-type
 																	 (and (Var? x) 
-																		  (let ([ts (assoc (Var-name x) (cdr loc-ts))])
+																		  (let ([ts (assoc (Var-name x) loc-ts)])
 																			(and ts (pair? ts) (eq? 'Vector (cdr ts)))))])
 															   (for ([d (if is-vec-type (set-union caller-save callee-save) caller-save)])
 																	(unless (equal? x d) (add-edge! g x (Reg d)))))))
