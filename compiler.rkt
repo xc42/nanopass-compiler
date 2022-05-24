@@ -55,15 +55,17 @@
 ;; HW1 Passes
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(define (map-program-def f p)
+(define-syntax-rule (map-program-def f p)
   (match-let ([(ProgramDefs info defs) p])
 			 (ProgramDefs info (map f defs))))
 
-(define (map-program-def-body f p)
+(define-syntax-rule (map-program-def-body f p)
   (map-program-def (lambda (def) 
 					 (match-let ([(Def fn ps rt info body) def])
 								(Def fn ps rt info (f body))))
 				   p))
+
+(define (fn-start-label fn) (string->symbol (~a fn 'start)))
 
 ;; R4 -> R4
 (define (shrink p)
@@ -511,15 +513,15 @@
 					   (for/list ([bb CFG])
 								 (let ([label (car bb)] 
 									   [stmts (cdr bb)]
-									   [start (~a fn 'start)]
+									   [start (fn-start-label fn)]
 									   [arg-pass-stmts
 										 (for/list ([p ps]
 													[r arg-registers])
 												   (Instr 'movq `(,(Reg r) ,(Var (car p)))))])
 								   (cons label 
 										 (if (eq? label start)
-											 (Block '() (trans-stmts stmts))
-											 (Block '() (append arg-pass-stmts (trans-stmts stmts)))))))])
+											 (Block '() (append arg-pass-stmts (trans-stmts stmts)))
+											 (Block '() (trans-stmts stmts))))))])
 				 (Def fn ps rt info^ CFG^))))
 
 
@@ -658,6 +660,7 @@
 			   [(Deref? rand) (Reg (Deref-reg rand))]
 			   [(Imm? rand) #f]
 			   [(Global? rand) #f] ;TODO
+			   [(FunRef? rand) #f] ;leaq TODO
 			   [else (error (format "unhandled operand ~a in get-infer-objs" rand))]))])
 	(if (null? rands)
 		'()
@@ -671,7 +674,7 @@
 		  (match instr
 				 [(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
 				  (cons `(,arg1 ,arg2) `(,arg2))]
-				 [(Instr (or 'movq 'movzbq) `(,arg1 ,arg2)) 
+				 [(Instr (or 'movq 'movzbq 'leaq) `(,arg1 ,arg2)) 
 				  (cons `(,arg1) `(,arg2))]
 				 [(Instr 'negq `(,e)) (cons `(,e) `(,e))]
 				 [(Instr 'set `(,c ,arg2)) (cons '() `(,arg2))]
@@ -733,55 +736,64 @@
 
 
 (define (build-interference p)
-  (match-let* ([(X86Program info lab-blks) p]
-			   [loc-ts (dict-ref info 'locals-types)]
-			   [infer-G
-				 (foldl 
-				   (lambda (v g) (add-vertex! g (Var v)) g) 
-				   (undirected-graph '()) 
-				   (map car loc-ts))])
-			  (define (graph-from label)
-				(match-let* ([`(,label . ,(Block binfo instrs)) (assoc label lab-blks)]
-							 [live-sets (dict-ref binfo 'live-set)]
-							 [g infer-G])
-							(for ([instr instrs]
-								  [lives (cdr live-sets)])
-								 (match instr
-										[(Instr 'movq `(,s ,d)) 
-										 (let ([s* (get-infer-objs `(,s))]
-											   [d* (get-infer-objs `(,d))])
-										   (set-for-each lives 
-														 (lambda (x) 
-														   (unless (or (and (not (null? s*)) (equal? x (car s*)))
-																	   (and (not (null? d*)) (equal? x (car d*)))) 
-															 (add-edge! g x (car d*))))))]
-										[(Instr 'movzbq `(,(ByteReg br) ,d))
-										 (let ([fr (Reg (byte-reg->full-reg (ByteReg-name br)))]
-											   [d* (get-infer-objs `(,d))])
-										 (set-for-each lives (lambda (x) (unless (or (equal? x fr) (equal? x (car d*))) (add-edge! g x (car d*))))))]
-										[(JmpIf f lab) (graph-from lab)]
-										[(Jmp lab) (graph-from lab)]
-										[(Callq label arity) 
-										 (if (eq? label 'collect)
-											 (set-for-each lives 
-														   (lambda (x)
-															 (let ([is-vec-type
-																	 (and (Var? x) 
-																		  (let ([ts (assoc (Var-name x) loc-ts)])
-																			(and ts (pair? ts) (eq? 'Vector (cdr ts)))))])
-															   (for ([d (if is-vec-type (set-union caller-save callee-save) caller-save)])
-																	(unless (equal? x d) (add-edge! g x (Reg d)))))))
-											 (set-for-each lives 
-														   (lambda (x) 
-															 (for ([d caller-save]) 
-																  (unless (equal? x d) (add-edge! g x (Reg d)))))))]
-										[_ (let ([w (cdr (get-instr-RW-set instr))])
-											 (set-for-each lives 
-														   (lambda (x)
-															 (for ([d w] #:unless (equal? x d))
-																  (add-edge! g x d)))))]))))
-			  (graph-from 'start)
-			  (X86Program (cons (cons 'conflicts infer-G) info) lab-blks)))
+  (define (build-from info lab-blks start)
+	(let* ([loc-ts (dict-ref info 'locals-types)]
+		   [infer-G
+			 (foldl 
+			   (lambda (v g) (add-vertex! g (Var v)) g) 
+			   (undirected-graph '()) 
+			   (map car loc-ts))])
+	  (letrec 
+		([from-label
+		   (lambda (label)
+			 (match-let* ([(Block binfo instrs) (dict-ref lab-blks label)]
+						 [live-sets (dict-ref binfo 'live-set)]
+						 [g infer-G])
+					(for ([instr instrs]
+						  [lives (cdr live-sets)])
+						 (match instr
+
+								[(Instr 'movq `(,s ,d)) 
+								 (let ([s* (get-infer-objs `(,s))]
+									   [d* (get-infer-objs `(,d))])
+								   (set-for-each lives 
+												 (lambda (x) 
+												   (unless (or (and (not (null? s*)) (equal? x (car s*)))
+															   (and (not (null? d*)) (equal? x (car d*)))) 
+													 (add-edge! g x (car d*))))))]
+
+								[(Instr 'movzbq `(,(ByteReg br) ,d))
+								 (let ([fr (Reg (byte-reg->full-reg br))]
+									   [d* (get-infer-objs `(,d))])
+								   (set-for-each lives (lambda (x) (unless (or (equal? x fr) (equal? x (car d*))) (add-edge! g x (car d*))))))]
+
+								[(JmpIf f lab) (from-label lab)]
+								[(Jmp lab) (from-label lab)]
+
+								[(or (Call f _) (IndirectCallq f _))
+								 (set-for-each lives 
+											   (lambda (x)
+												 (let ([vec?
+														 (and (Var? x) 
+															  (eq? 'Vector (dict-ref  loc-ts (Var-name x) #f)))])
+												   (for ([d (if (and vec? (or (eq? f 'collect) (IndirectCallq? instr)))
+																(set-union caller-save callee-save)
+																caller-save)])
+														(unless (equal? x d) (add-edge! g x (Reg d)))))))]
+
+								[_ (let ([w (cdr (get-instr-RW-set instr))])
+									 (set-for-each lives 
+												   (lambda (x)
+													 (for ([d w] #:unless (equal? x d))
+														  (add-edge! g x d)))))]))))])
+			  (from-label start))))
+
+  (define (build-from-def def)
+	(match-let ([(Def fn ps rt info CFG) def])
+			   (Def fn ps rt (cons `(conflicts . ,(build-from info CFG (fn-start-label fn))) info) CFG)))
+  (match p
+		 [(X86Program info CFG) (X86Program (cons `(conflicts . ,(build-from info CFG 'start)) info) CFG)]
+		 [(? ProgramDefs?) (map-program-def build-from-def p)]))
 
 
 (require "priority_queue.rkt")
@@ -819,79 +831,93 @@
 			(pqueue-decrease-key! Q (hash-ref v-h v))
 			(colorize))))))
 
-(define (allocate-register P [limit-reg 3] [rootstack-size (runtime-config::rootstack-size)] [heap-size (runtime-config::heap-size)])
-  (match-let* ([(X86Program info lab-blks) P]
-			   [color-map (color-graph (cdr (assoc 'conflicts info)))]
-			   [(Block binfo stmts) (cdr (assoc 'start lab-blks))]
-			   [`(,spilled-bx ,rootst-spilled-bx) `(,(box 0) ,(box 0))]
-			   [var-map
-				 (let scan-var ([loc-ts (cdr (assoc 'locals-types info))] [spilled 0] [rootst-spilled 0])
-				   (if (null? loc-ts)
-					   (begin (set-box! spilled-bx spilled) (set-box! rootst-spilled-bx rootst-spilled) '())
-					   (let* ([var (Var (caar loc-ts))]
-							  [ts (cdar loc-ts)]
-							  [is-vec-type  (and (pair? ts) (eq? (car ts) 'Vector))])
-						 (if (hash-has-key? color-map var)
-							 (let ([reg-idx (hash-ref color-map var)])
-							   (if (or (< reg-idx 0) (>= reg-idx limit-reg))
-								   (if  is-vec-type
-									 (cons (cons var (Deref rootstack-reg (* 8 (+ 1 rootst-spilled)))) (scan-var (cdr loc-ts) spilled (+ rootst-spilled 1))) ; spill to rootstack for gc
-									 (cons (cons var (Deref 'rbp (* -8 (+ 1 spilled)))) (scan-var (cdr loc-ts) (+ spilled 1) rootst-spilled)))
-								   (cons (cons var (Reg (vector-ref general-registers reg-idx))) (scan-var (cdr loc-ts) spilled rootst-spilled))))
-							 (cons (cons var var) (scan-var (cdr loc-ts) spilled))))))]
-			   [used-callee-regs (for/set ([kv (in-list var-map)] #:when (set-member? callee-save (cdr kv))) (cdr kv))]
-			   [used-stack-size (* 8 (unbox spilled-bx))]
-			   [align-stack-size (* 16 (quotient (+ used-stack-size 15) 16))]
-			   [replace-instr 
-				 (lambda (instr)
-				   (match instr
-						  [(Instr op args) 
-						   (Instr op (map (lambda (arg) 
-											(let ([pr (assoc arg var-map)])
-											  (if pr (cdr pr) arg)))
-										  args))]
-						  [_ instr]))])
-			  (X86Program (cons (cons 'num-root-spills (unbox rootst-spilled-bx)) info)
-						  (cons
-							(cons 'main
-								  (Block '() (append
-											   `(,(Instr 'pushq `(,(Reg 'rbp)))
-												 ,(Instr 'movq `(,(Reg 'rsp) ,(Reg 'rbp))))
-											   (for/list ([reg (in-set used-callee-regs)]) (Instr 'pushq `(,reg)))
-											   `(,(Instr 'subq `(,(Imm align-stack-size) ,(Reg 'rsp)))
-												 ,(Instr 'movq `(,(Imm rootstack-size)  ,(Reg 'rdi)))
-												 ,(Instr 'movq `(,(Imm heap-size) ,(Reg 'rsi)))
-												 ,(Callq 'initialize 2)
-												 ,(Instr 'movq `(,(Global  'rootstack_begin) ,(Reg rootstack-reg)))
-												 ,(Instr 'movq `(,(Imm 0) ,(Deref rootstack-reg 0)))
-												 ,(Instr 'addq `(,(Imm (unbox rootst-spilled-bx)) ,(Reg rootstack-reg)))
-											     ,(Jmp 'start)))))
-							(cons 
-							  (cons 'conclusion 
-									(Block '() (append
-												 `(,(Instr 'subq `(,(Imm (unbox rootst-spilled-bx)) ,(Reg rootstack-reg)))
-												   ,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
-												 (for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
-												 `(,(Instr 'popq `(,(Reg 'rbp)))
-												   ,(Retq)))))
-							  (map 
-								(let ([tails 
-										(let find-tails ([label 'start])
-										  (let* ([stmts (Block-instr* (cdr (assoc label lab-blks)))]
-												 [jmps (for/list ([stmt stmts] #:when (or (JmpIf? stmt) (Jmp? stmt)))
-																 (match stmt
-																		[(JmpIf _ next) next]
-																		[(Jmp next) next]))])
-											(if (null? jmps)
-												(set label)
-												(apply set-union (cons (set label) (map find-tails jmps))))))])
+(define (allocate-register p [limit-reg 3] [rootstack-size (runtime-config::rootstack-size)] [heap-size (runtime-config::heap-size)])
 
-								  (lambda (lab-blk)
-									(match-let ([(cons lab* (Block binfo* stmts*)) lab-blk])
-											   (if (set-member? tails lab*)
-												   (cons lab* (Block binfo* (append (map replace-instr stmts*) `(,(Jmp 'conclusion)))))
-												   (cons lab* (Block binfo* (map replace-instr stmts*)))))))
-								lab-blks))))))
+  (define (do-allocate entry-label info lab-blks)
+	(match-let*
+	  ([color-map (color-graph (dict-ref info 'conflicts))]
+	  [(Block binfo stmts) (dict-ref  lab-blks entry-label)]
+	  [`(,spilled-bx ,rootst-spilled-bx) `(,(box 0) ,(box 0))]
+	  [var-map
+		(let scan-var ([loc-ts (dict-ref info 'locals-types #f)] [spilled 0] [rootst-spilled 0])
+		  (if (not loc-ts)
+			  (begin (set-box! spilled-bx spilled) (set-box! rootst-spilled-bx rootst-spilled) '())
+			  (let* ([var (Var (caar loc-ts))]
+					 [ts (cdar loc-ts)]
+					 [is-vec-type  (and (pair? ts) (eq? (car ts) 'Vector))])
+				(if (hash-has-key? color-map var)
+					(let ([reg-idx (hash-ref color-map var)])
+					  (if (or (< reg-idx 0) (>= reg-idx limit-reg))
+						  (if  is-vec-type
+							   (cons (cons var (Deref rootstack-reg (* 8 (+ 1 rootst-spilled)))) (scan-var (cdr loc-ts) spilled (+ rootst-spilled 1))) ; spill to rootstack for gc
+							   (cons (cons var (Deref 'rbp (* -8 (+ 1 spilled)))) (scan-var (cdr loc-ts) (+ spilled 1) rootst-spilled)))
+						  (cons (cons var (Reg (vector-ref general-registers reg-idx))) (scan-var (cdr loc-ts) spilled rootst-spilled))))
+					(cons (cons var var) (scan-var (cdr loc-ts) spilled))))))]
+	  [used-callee-regs (for/set ([kv (in-list var-map)] #:when (set-member? callee-save (cdr kv))) (cdr kv))]
+	  [used-stack-size (* 8 (unbox spilled-bx))]
+	  [align-stack-size (* 16 (quotient (+ used-stack-size 15) 16))]
+	  [replace-instr 
+		(lambda (instr)
+		  (match instr
+				 [(Instr op args) 
+				  (Instr op (map (lambda (arg) 
+								   (let ([pr (assoc arg var-map)])
+									 (if pr (cdr pr) arg)))
+								 args))]
+				 [_ instr]))])
+	(values (cons (cons 'num-root-spills (unbox rootst-spilled-bx)) info)
+			(cons
+			  (cons entry-label
+					(Block '() (append
+								 `(,(Instr 'pushq `(,(Reg 'rbp)))
+									,(Instr 'movq `(,(Reg 'rsp) ,(Reg 'rbp))))
+								 (for/list ([reg (in-set used-callee-regs)]) (Instr 'pushq `(,reg)))
+								 `(,(Instr 'subq `(,(Imm align-stack-size) ,(Reg 'rsp)))
+									,(Instr 'movq `(,(Imm rootstack-size)  ,(Reg 'rdi)))
+									,(Instr 'movq `(,(Imm heap-size) ,(Reg 'rsi)))
+									,(Callq 'initialize 2)
+									,(Instr 'movq `(,(Global  'rootstack_begin) ,(Reg rootstack-reg)))
+									,(Instr 'movq `(,(Imm 0) ,(Deref rootstack-reg 0)))
+									,(Instr 'addq `(,(Imm (unbox rootst-spilled-bx)) ,(Reg rootstack-reg)))
+									,(Jmp 'start)))))
+			  (cons 
+				(cons 'conclusion 
+					  (Block '() (append
+								   `(,(Instr 'subq `(,(Imm (unbox rootst-spilled-bx)) ,(Reg rootstack-reg)))
+									  ,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
+								   (for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
+								   `(,(Instr 'popq `(,(Reg 'rbp)))
+									  ,(Retq)))))
+				(map 
+				  (let ([tails 
+						  (let find-tails ([label entry-label])
+							(let* ([stmts (Block-instr* (dict-ref lab-blks label))]
+								   [jmps (for/list ([stmt stmts] #:when (or (JmpIf? stmt) (Jmp? stmt)))
+												   (match stmt
+														  [(JmpIf _ next) next]
+														  [(Jmp next) next]))])
+							  (if (null? jmps)
+								  (set label)
+								  (apply set-union (cons (set label) (map find-tails jmps))))))])
+
+					(lambda (lab-blk)
+					  (match-let ([(cons lab* (Block binfo* stmts*)) lab-blk])
+								 (if (set-member? tails lab*)
+									 (cons lab* (Block binfo* (append (map replace-instr stmts*) `(,(Jmp 'conclusion)))))
+									 (cons lab* (Block binfo* (map replace-instr stmts*)))))))
+				  lab-blks))))))
+
+  (define (allocate-for-def def)
+	(match-let ([(Def fn ps rt info CFG) def])
+			   (let-values ([(info* CFG*) (do-allocate (fn-start-label fn) info CFG )])
+				 (Def fn ps rt info* CFG*))))
+
+  (match p
+		 [(X86Program info lab-blks)
+		  (let-values ([(info* lab-blks*) (do-allocate 'main info lab-blks)])
+			(X86Program info* lab-blks*))]
+		 [(? ProgramDefs?) (map-program-def allocate-for-def p)]))
+									
 
 ;; print-x86 : x86 -> string 
 (define (print-x86 p)
