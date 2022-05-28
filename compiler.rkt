@@ -143,13 +143,13 @@
 	(letrec ([reveal-functions*
 			   (lambda (expr)
 				 (match expr
-						[(or (? Bool?) (? Int?) (Prim 'read '())) expr]
 						[(Var v) (let ([f* (member v fs)]) (if  f* (FunRef v) expr))]
 						[(HasType e t) (HasType (reveal-functions* e) t)]
 						[(Let x e body) (Let x (reveal-functions* e) (reveal-functions* body))]
 						[(If e1 e2 e3) (If (reveal-functions* e1) (reveal-functions* e2) (reveal-functions* e3))]
 						[(Prim op es) (Prim op (map reveal-functions* es))]
-						[(Apply f args) (Apply (reveal-functions* f) (map reveal-functions* args))]))])
+						[(Apply f args) (Apply (reveal-functions* f) (map reveal-functions* args))]
+						[_ expr]))])
 	  (match p
 			 [(? Program?) p]
 			 [(? ProgramDefs?) (map-program-def-body reveal-functions* p)]))))
@@ -679,11 +679,14 @@
 				 [(Instr 'negq `(,e)) (cons `(,e) `(,e))]
 				 [(Instr 'set `(,c ,arg2)) (cons '() `(,arg2))]
 				 [(Instr 'cmpq rands) (cons rands '())]
-				 [(or (Callq _ arity) (IndirectCallq _ arity))
+				 [(Callq _ arity)
 				  (cons (for/list ([x (vector-take arg-registers arity)]) (Reg x)) 
 						(for/list ([r caller-save]) (Reg r)))]
-				 [(TailJmp _ arity)  ; TODO is this right?
-				  (cons (for/list ([x (vector-take arg-registers arity)]) (Reg x)) 
+				 [(IndirectCallq f arity)
+				  (cons (cons f (for/list ([x (vector-take arg-registers arity)]) (Reg x)))
+						(for/list ([r caller-save]) (Reg r)))]
+				 [(TailJmp f arity)  ; TODO is this right?
+				  (cons (cons f (for/list ([x (vector-take arg-registers arity)]) (Reg x)))
 						'())] 
 				 
 				 [_ (error (format "unhandled instr ~a in get-instr-RW-set" instr))])])
@@ -770,7 +773,7 @@
 								[(JmpIf f lab) (from-label lab)]
 								[(Jmp lab) (from-label lab)]
 
-								[(or (Call f _) (IndirectCallq f _))
+								[(or (Callq f _) (IndirectCallq f _))
 								 (set-for-each lives 
 											   (lambda (x)
 												 (let ([vec?
@@ -785,7 +788,8 @@
 									 (set-for-each lives 
 												   (lambda (x)
 													 (for ([d w] #:unless (equal? x d))
-														  (add-edge! g x d)))))]))))])
+														  (add-edge! g x d)))))]))
+					g ))]) ;remember to return g
 			  (from-label start))))
 
   (define (build-from-def def)
@@ -833,41 +837,42 @@
 
 (define (allocate-register p [limit-reg 3] [rootstack-size (runtime-config::rootstack-size)] [heap-size (runtime-config::heap-size)])
 
-  (define (do-allocate entry-label info lab-blks)
+  (define (do-allocate start-label info lab-blks)
 	(match-let*
 	  ([color-map (color-graph (dict-ref info 'conflicts))]
-	  [(Block binfo stmts) (dict-ref  lab-blks entry-label)]
-	  [`(,spilled-bx ,rootst-spilled-bx) `(,(box 0) ,(box 0))]
-	  [var-map
-		(let scan-var ([loc-ts (dict-ref info 'locals-types #f)] [spilled 0] [rootst-spilled 0])
-		  (if (not loc-ts)
-			  (begin (set-box! spilled-bx spilled) (set-box! rootst-spilled-bx rootst-spilled) '())
-			  (let* ([var (Var (caar loc-ts))]
-					 [ts (cdar loc-ts)]
-					 [is-vec-type  (and (pair? ts) (eq? (car ts) 'Vector))])
-				(if (hash-has-key? color-map var)
-					(let ([reg-idx (hash-ref color-map var)])
-					  (if (or (< reg-idx 0) (>= reg-idx limit-reg))
-						  (if  is-vec-type
-							   (cons (cons var (Deref rootstack-reg (* 8 (+ 1 rootst-spilled)))) (scan-var (cdr loc-ts) spilled (+ rootst-spilled 1))) ; spill to rootstack for gc
-							   (cons (cons var (Deref 'rbp (* -8 (+ 1 spilled)))) (scan-var (cdr loc-ts) (+ spilled 1) rootst-spilled)))
-						  (cons (cons var (Reg (vector-ref general-registers reg-idx))) (scan-var (cdr loc-ts) spilled rootst-spilled))))
-					(cons (cons var var) (scan-var (cdr loc-ts) spilled))))))]
-	  [used-callee-regs (for/set ([kv (in-list var-map)] #:when (set-member? callee-save (cdr kv))) (cdr kv))]
-	  [used-stack-size (* 8 (unbox spilled-bx))]
-	  [align-stack-size (* 16 (quotient (+ used-stack-size 15) 16))]
-	  [replace-instr 
-		(lambda (instr)
-		  (match instr
-				 [(Instr op args) 
-				  (Instr op (map (lambda (arg) 
-								   (let ([pr (assoc arg var-map)])
-									 (if pr (cdr pr) arg)))
-								 args))]
-				 [_ instr]))])
+	   [(Block binfo stmts) (dict-ref  lab-blks start-label)]
+	   [`(,spilled-bx ,rootst-spilled-bx) `(,(box 0) ,(box 0))]
+	   [var-map
+		 (let scan-var ([loc-ts (dict-ref info 'locals-types '())] [spilled 0] [rootst-spilled 0])
+		   (if (null? loc-ts)
+			   (begin (set-box! spilled-bx spilled) (set-box! rootst-spilled-bx rootst-spilled) '())
+			   (let* ([var (Var (caar loc-ts))]
+					  [ts (cdar loc-ts)]
+					  [is-vec-type  (and (pair? ts) (eq? (car ts) 'Vector))])
+				 (if (hash-has-key? color-map var)
+					 (let ([reg-idx (hash-ref color-map var)])
+					   (if (or (< reg-idx 0) (>= reg-idx limit-reg))
+						   (if  is-vec-type
+								(cons (cons var (Deref rootstack-reg (* 8 (+ 1 rootst-spilled)))) (scan-var (cdr loc-ts) spilled (+ rootst-spilled 1))) ; spill to rootstack for gc
+								(cons (cons var (Deref 'rbp (* -8 (+ 1 spilled)))) (scan-var (cdr loc-ts) (+ spilled 1) rootst-spilled)))
+						   (cons (cons var (Reg (vector-ref general-registers reg-idx))) (scan-var (cdr loc-ts) spilled rootst-spilled))))
+					 (cons (cons var var) (scan-var (cdr loc-ts) spilled))))))]
+	   [used-callee-regs (for/set ([kv (in-list var-map)] #:when (set-member? callee-save (cdr kv))) (cdr kv))]
+	   [used-stack-size (* 8 (unbox spilled-bx))]
+	   [align-stack-size (* 16 (quotient (+ used-stack-size 15) 16))]
+	   [replace-instr 
+		 (lambda (instr)
+		   (let ([replace-rand (lambda (rand) (dict-ref var-map rand rand))])
+			 (match instr
+					[(Instr op args) (Instr op (map replace-rand args))]
+					[(IndirectCallq f arity) (IndirectCallq (replace-rand f) arity)]
+					[(TailJmp f arity) (TailJmp (replace-rand f) arity)]
+					[_ instr])))]
+	   [prelude-label (string->symbol (~a start-label 'prelude))]
+	   [conclusion-label (string->symbol (~a start-label 'conclusion))])
 	(values (cons (cons 'num-root-spills (unbox rootst-spilled-bx)) info)
 			(cons
-			  (cons entry-label
+			  (cons prelude-label
 					(Block '() (append
 								 `(,(Instr 'pushq `(,(Reg 'rbp)))
 									,(Instr 'movq `(,(Reg 'rsp) ,(Reg 'rbp))))
@@ -879,9 +884,9 @@
 									,(Instr 'movq `(,(Global  'rootstack_begin) ,(Reg rootstack-reg)))
 									,(Instr 'movq `(,(Imm 0) ,(Deref rootstack-reg 0)))
 									,(Instr 'addq `(,(Imm (unbox rootst-spilled-bx)) ,(Reg rootstack-reg)))
-									,(Jmp 'start)))))
+									,(Jmp start-label)))))
 			  (cons 
-				(cons 'conclusion 
+				(cons conclusion-label
 					  (Block '() (append
 								   `(,(Instr 'subq `(,(Imm (unbox rootst-spilled-bx)) ,(Reg rootstack-reg)))
 									  ,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
@@ -890,7 +895,7 @@
 									  ,(Retq)))))
 				(map 
 				  (let ([tails 
-						  (let find-tails ([label entry-label])
+						  (let find-tails ([label start-label])
 							(let* ([stmts (Block-instr* (dict-ref lab-blks label))]
 								   [jmps (for/list ([stmt stmts] #:when (or (JmpIf? stmt) (Jmp? stmt)))
 												   (match stmt
@@ -903,7 +908,7 @@
 					(lambda (lab-blk)
 					  (match-let ([(cons lab* (Block binfo* stmts*)) lab-blk])
 								 (if (set-member? tails lab*)
-									 (cons lab* (Block binfo* (append (map replace-instr stmts*) `(,(Jmp 'conclusion)))))
+									 (cons lab* (Block binfo* (append (map replace-instr stmts*) `(,(Jmp conclusion-label)))))
 									 (cons lab* (Block binfo* (map replace-instr stmts*)))))))
 				  lab-blks))))))
 
