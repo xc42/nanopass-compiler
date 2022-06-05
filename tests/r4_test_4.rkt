@@ -1,7 +1,9 @@
-(define (sum [n : Integer]) : Integer
-  (if (<= n 1)
-	  1
-	  (+ n (sum (- n 1)))))
+(define (mapVec [f : (Integer -> Integer)]
+				 [v : (Vector Integer Integer)])
+  : (Vector Integer Integer)
+  (vector (f (vector-ref v 0)) (f (vector-ref v 1))))
 
+(define (add1 [x : Integer]) : Integer
+  (+ x 8))
 
-(sum 10)
+(vector-ref (mapVec add1 (vector 3 41)) 0)
