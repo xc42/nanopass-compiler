@@ -85,9 +85,9 @@
 								  (Prim '+ `(,e1 ,(Prim '- es))))]
 						  ['and (If e1 (If (car es) T F) F)]
 						  ['or (If e1 T (If (car es) T F))]
-						  ['<= (If (Prim '< new-es) T (If (Prim 'eq? new-es) T F))]
-						  ['>= (Prim 'not `(,(Prim '< new-es)))]
-						  ['>  (If (Prim 'not `(,(Prim '< new-es))) (If (Prim 'eq? new-es) F T) F)]
+						  ;['<= (If (Prim '< new-es) T (If (Prim 'eq? new-es) T F))]
+						  ;['>= (Prim 'not `(,(Prim '< new-es)))]
+						  ;['>  (If (Prim 'not `(,(Prim '< new-es))) (If (Prim 'eq? new-es) F T) F)]
 						  [other (Prim op new-es)]))]
 				[(Let v e body) (Let v (shrink-exp e) (shrink-exp body))]
 				[(If cnd thn els) (If (shrink-exp cnd) (shrink-exp thn) (shrink-exp els))]
@@ -344,7 +344,7 @@
 					[(Apply f args) 
 					 (let ([v (gensym 'auto-if-call)]) 
 					   (explicate-assign v (Call f args) (explicate-pred (Var v) lz-thn lz-els)))]
-					[(Prim (or 'eq? '<) rands) (IfStmt pred (force lz-thn) (force lz-els))]
+					[(Prim (or 'eq? '< '<= '> '>=) rands) (IfStmt pred (force lz-thn) (force lz-els))]
 					[(Prim 'not `(,pred*)) (explicate-pred pred* lz-els lz-thn)]
 					[(Let v e body) (explicate-assign v e (explicate-pred body lz-thn lz-els))]
 					[(If pred* thn* els*) 
@@ -359,7 +359,7 @@
 					[(If pred thn els) (explicate-pred pred (lz-add-CFG (explicate-tail thn)) (lz-add-CFG (explicate-tail els)))]
 					[(Apply f args) (TailCall f args)]
 					[other (Return expr)]))])
-	  (begin (add-CFG (explicate-tail expr-body) start-label) CFG))))
+	  (begin (add-CFG (explicate-tail expr-body) (symbol->string start-label)) CFG))))
 
 	  (match p
 			 [(Program info e) (CProgram info (explicate-control-expr e 'start))]
@@ -398,6 +398,14 @@
 			   [r arg-registers])
 			  (Instr 'movq (list (to-X86-val arg) (Reg r)))))
 
+  (define (cmpop->flag op)
+	(match op
+		   ['eq?  (cons equal? 'e)]
+		   ['< (cons < 'l)]
+		   ['<= (cons <= 'le)]
+		   ['> (cons > 'g)]
+		   ['>= (cons >= 'ge)]))
+
   (define (trans-assign stmt)
 	(match-let ([(Assign dst expr) stmt])
 	   (match expr
@@ -414,7 +422,7 @@
 		 [(Prim 'read '()) `(,(Callq 'read_int 0) ,(Instr 'movq (list (Reg 'rax) dst)))]
 		 [(Prim 'not `(,e)) 
 		  (match e
-				 [(Bool b) `(,(Instr 'movq (list(Imm (if b 0 1)) dst)))]
+				 [(Bool b) `(,(Instr 'movq (list (Imm (if b 0 1)) dst)))]
 				 [(Var v)  (if (equal? e dst)
 							   `(,(Instr 'xorq (list (Imm 1) dst)))
 							   `(,(Instr 'movq (list e dst)) ,(Instr 'xorq (list (Imm 1) dst))))])]
@@ -445,10 +453,8 @@
 		  (list (Instr 'movq `(,v ,(Reg 'r11)))
 				(Instr 'movq `(,(to-X86-val arg) ,(Deref 'r11 (* 8 (+ (Int-value i) 1)))))
 				(Instr 'movq `(,(Imm 0) ,dst)))]
-		 [(Prim (or 'eq? '<) `(,e1 ,e2))
-		  (let-values ([(op cc) (if (eq? (Prim-op expr) 'eq?) 
-									   (values equal? 'e)
-									   (values < 'l))])
+		 [(Prim (or 'eq? '< '<= '> '>=) `(,e1 ,e2))
+		  (match-let ([`(,op . ,cc) (cmpop->flag (Prim-op expr))])
 			(cond 
 			  [(and (constant? e1) (constant? e2)) `(,(Instr 'movq (list (Imm (if (op (get-const-val e1) (get-const-val e2)) 1 0)) dst)))]
 			  [else `(,(Instr 'cmpq `(,(to-X86-val e2) ,(to-X86-val e1))) 
@@ -476,9 +482,7 @@
 			(match-let ([(Prim op `(,e1 ,e2))  pred])
 					   (let ([v1 (to-X86-val e1)]
 							 [v2 (to-X86-val e2)]
-							 [flag (match op
-										  ['eq? 'e]
-										  ['< 'l])])
+							 [flag (cdr (cmpop->flag op))])
 						 `(,(Instr 'cmpq (list v2 v1)) ,(JmpIf flag (Goto-label thn)) ,(Jmp (Goto-label els)))))]
 		   [(Return expr) (match expr
 								 [(Prim '+ `(,(Int n1) ,(Int n2))) 
@@ -499,6 +503,9 @@
 								 [(Int n) `(,(Instr 'movq (list (Imm n) (Reg 'rax))))]
 								 [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
 
+  (define (num-root-spills info)
+	(count (lambda (ts) (and (pair? ts) (eq? 'Vector (car ts)))) (dict-ref info 'locals-types '())))
+
   (define (trans-def def)
 	(match-let ([(Def fn ps rt info CFG) def])
 			   (let ([info^
@@ -506,9 +513,7 @@
 						 (list 
 						   (cons 'num-params (length ps))
 						   (cons 'name fn)
-						   (cons 'num-root-spills  ; for interp-x86-2
-								 (length (filter (lambda (ts) (and (pair? ts) (eq? 'Vector (car ts)))) 
-												 (assoc 'locals-types info)))))
+						   (cons 'num-root-spills (num-root-spills info))) ; for interp-x86-2
 						 info)]
 					 [CFG^ 
 					   (for/list ([bb CFG])
@@ -528,7 +533,7 @@
 
   (match (type-check-Cfun p)
 	[(CProgram info CFG) 
-	 (X86Program info 
+	 (X86Program (cons `(num-root-spills . ,(num-root-spills info)) info)
 				 (for/list ([bb CFG]) 
 						   (cons (car bb) 
 								 (Block '() (trans-stmts (cdr bb))))))]
@@ -841,7 +846,7 @@
 			   (set)
 			   (set (Reg rootstack-reg))))]
 			   
-	   [used-stack-size (* 8 (unbox spilled-bx))]
+	   [`(,used-stack-size ,used-rootst-size) `(,(* 8 (unbox spilled-bx)) ,(* 8 (unbox rootst-spilled-bx)))]
 
 	   [align-stack-size (* 16 (quotient (+ used-stack-size 15) 16))]
 
@@ -865,8 +870,8 @@
 			  (cons fn
 					(Block '() (append
 								 `(,(Instr 'pushq `(,(Reg 'rbp)))
+									,@(for/list ([reg (in-set used-callee-regs)]) (Instr 'pushq `(,reg))) ;; save callee-saved register
 									,(Instr 'movq `(,(Reg 'rsp) ,(Reg 'rbp))))
-								 (for/list ([reg (in-set used-callee-regs)]) (Instr 'pushq `(,reg))) ;; save callee-saved register
 								 (if (not (= 0 align-stack-size))
 									 `(,(Instr 'subq `(,(Imm align-stack-size) ,(Reg 'rsp)))) ;;reserve stack space
 									 '())
@@ -880,18 +885,19 @@
 										,@(if (eq? fn 'main)
 											  `(,(Instr 'movq `(,(Imm 0) ,(Deref rootstack-reg 0)))) ;; init rootstack to empty(see runtime.c), only in main 
 											  '())
-										,(Instr 'addq `(,(Imm (unbox rootst-spilled-bx)) ,(Reg rootstack-reg))))
+										,(Instr 'addq `(,(Imm used-rootst-size) ,(Reg rootstack-reg))))
 									 '())
 									`(,(Jmp start-label)))))
 			  (cons 
 				(cons conclusion-label
 					  (Block '() (append
 								   `(,@(if (not (= 0 (unbox rootst-spilled-bx)))
-										   `(,(Instr 'subq `(,(Imm (unbox rootst-spilled-bx)) ,(Reg rootstack-reg))))
+										   `(,(Instr 'subq `(,(Imm used-rootst-size) ,(Reg rootstack-reg)))
+											  ,(Instr 'movq `(,(Reg rootstack-reg) ,(Global 'rootstack_end)))) 
 										   '())
 									  ,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
-								   (for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
-								   `(,(Instr 'popq `(,(Reg 'rbp)))
+								   `(,@(for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
+									 ,(Instr 'popq `(,(Reg 'rbp)))
 									  ,(Retq)))))
 				(map 
 				  (let ([tails 
