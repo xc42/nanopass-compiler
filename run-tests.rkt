@@ -103,5 +103,25 @@
 	("patch instructions",patch-instructions ,interp-x86-3) 
 	("print x86" ,print-x86 #f)
 	))
-(interp-tests "r4" type-check-Rfun r4-passes interp-Rfun "r4_test" (tests-for "r4"))
-(compiler-tests "r4" type-check-Rfun r4-passes "r4_test" (tests-for "r4"))
+;(interp-tests "r4" type-check-Rfun r4-passes interp-Rfun "r4_test" (tests-for "r4"))
+;(compiler-tests "r4" type-check-Rfun r4-passes "r4_test" (tests-for "r4"))
+
+
+
+(define r5-passes
+  `(("shrink" ,shrink ,interp-Rlambda)
+	("uniquify" ,uniquify ,interp-Rlambda)
+	("reaveal functions" ,reveal-functions ,interp-Rlambda)
+	("closure conversion" ,convert-to-closure ,interp-Rlambda-prime)
+	;("limit functions" ,limit-functions ,interp-Rlambda)
+	;("expose allocation" ,expose-allocation ,interp-Rlambda-prime)
+	;("remove complex opera*" ,remove-complex-opera* ,interp-Rlambda-prime)
+	;("explicate control" ,explicate-control ,interp-Cfun)
+	;("instruction selection" ,select-instructions ,interp-pseudo-x86-3)
+	;("remove jumps" ,remove-jumps ,interp-pseudo-x86-3)
+	;("allocate register" ,(lambda (p) (allocate-register (build-interference (uncover-live p)))) ,interp-pseudo-x86-3)
+	;("patch instructions",patch-instructions ,interp-x86-3) 
+	;("print x86" ,print-x86 #f)
+	))
+(interp-tests "r5" type-check-Rfun r5-passes interp-Rfun "r5_test" (tests-for "r5"))
+(compiler-tests "r5" type-check-Rfun r5-passes "r5_test" (tests-for "r5"))

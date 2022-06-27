@@ -5,6 +5,7 @@
 (require "utilities.rkt")
 (require "type-check-Rfun.rkt")
 (require "type-check-Cfun.rkt")
+(require "type-check-Rlambda.rkt")
 (require (prefix-in runtime-config:: "runtime-config.rkt"))
 (require graph)
 (require racket/promise)
@@ -67,7 +68,18 @@
 
 (define (fn-start-label fn) (string->symbol (~a fn 'start)))
 
-;; R4 -> R4
+;;apply f to expr recursively
+(define (map-over-expr f expr)
+  (let ([f^ (lambda (e) (map-over-expr f e))])
+	(match expr
+		   [(Prim op es) (Prim op (map f^ es))]
+		   [(If e1 e2 e3) (If (f^ e1) (f^ e2) (f^ e3))]
+		   [(Apply f e) (Apply (f^ f) (f^ e))]
+		   [(Let v e body) (Let (f^ v) (f^ e) (f^ body))]
+		   [(Lambda ps rt body) (Lambda ps rt (f^ body))]
+		   [else expr])))
+
+;; R5 -> R5
 (define (shrink p)
   (letrec
 	([shrink-exp
@@ -93,6 +105,7 @@
 				[(If cnd thn els) (If (shrink-exp cnd) (shrink-exp thn) (shrink-exp els))]
 				[(HasType e t) (HasType (shrink-exp e) t)]
 				[(Apply f args) (Apply (shrink-exp f) (map shrink-exp args))]
+				[(Lambda ps rt body) (Lambda ps rt (shrink-exp body))]
 				[_ e]))])
 	(match p
 		   [(Program info body) (Program info (shrink-exp body))]
@@ -104,7 +117,7 @@
 								 `(,(Def 'main '() 'Integer '() (shrink-exp expr)))))])))
 
 
-;; uniquify : R4 -> R4
+;; uniquify : R5 -> R5
 (define (uniquify p)
   (define (uniquify-exp env)
 	(lambda (e)
@@ -119,7 +132,12 @@
 				  (Let x* (uniq e) ((uniquify-exp (extend-env env x x*)) body)))]
 			   [(If e1 e2 e3) (If (uniq e1) (uniq e2) (uniq e3))]
 			   [(Prim op es) (Prim op (map uniq es))]
-			   [(Apply f args) (Apply (uniq f) (map uniq args))]))))
+			   [(Apply f args) (Apply (uniq f) (map uniq args))]
+			   [(Lambda ps rt body) 
+				(let ([env-ex (for/fold ([env^ env])
+										([x ps])
+										(extend-env env^ (car x) (gensym (car x))))])
+				(Lambda ps rt ((uniquify-exp env-ex) body)))]))))
   (match p
 		 [(Program info body) (Program info ((uniquify-exp '()) body))]
 		 [(ProgramDefs info defs)
@@ -139,21 +157,59 @@
 
 ;; R4 -> R4
 (define (reveal-functions p)
-  (let ([fs (map (lambda (def) (Def-name def)) (ProgramDefs-def* p))])
+  (let ([fs (for/list ([def (ProgramDefs-def* p)]) 
+					(cons (Def-name def) (length (Def-param* def))))])
 	(letrec ([reveal-functions*
 			   (lambda (expr)
 				 (match expr
-						[(Var v) (let ([f* (member v fs)]) (if  f* (FunRef v) expr))]
+						[(Var v) (let ([f* (assv v fs)]) (if  f* (FunRefArity v (cdr f*)) expr))]
 						[(HasType e t) (HasType (reveal-functions* e) t)]
 						[(Let x e body) (Let x (reveal-functions* e) (reveal-functions* body))]
 						[(If e1 e2 e3) (If (reveal-functions* e1) (reveal-functions* e2) (reveal-functions* e3))]
 						[(Prim op es) (Prim op (map reveal-functions* es))]
 						[(Apply f args) (Apply (reveal-functions* f) (map reveal-functions* args))]
+						[(Lambda ps rt body) (Lambda ps rt (reveal-functions* body))]
 						[_ expr]))])
 	  (match p
 			 [(? Program?) p]
 			 [(? ProgramDefs?) (map-program-def-body reveal-functions* p)]))))
 						
+
+(define (convert-to-closure p)
+  (define (free-variable expr)
+	(match expr
+		   [(HasType e t) (free-variable e)]
+		   [(Let x e body) (set-union (free-variable e) (set-remove (free-variable body) x))]
+		   [(Lambda ps rty body) (set-subtract (free-variable body) (apply set (map car ps)))]
+		   [(If e1 e2 e3) (apply set-union (map free-variable `(,e1 ,e3 ,e3)))]
+		   [(Apply f args) (apply set-union (map free-variable (cons f args)))]
+		   [(Prim op es) (apply set-union (map free-variable es))]
+		   [(Var x) (set x)]
+		   [else (set)]))
+
+  (define (convert-def def)
+	(let ([prefix (string->symbol (~a (Def-name def) "_lambda"))]
+		  [lift-fns '()])
+
+	  (define (convert-expr expr)
+		(match expr
+			   [(Lambda ps rt body) 
+				(let* ([lift-fn-name (gensym prefix)]
+					   [lift-fn (Def lift-fn-name ps rt (Def-info def) (convert-expr body))])
+				  (set! lift-fns (cons lift-fn lift-fns))
+				  (Closure (length ps) (cons (FunRef lift-fn-name) (free-variable expr))))]
+			   [else (map-over-expr convert-expr expr)]))
+
+	  (match-let ([(Def name ps rt info body) def])
+				 (cons (Def name ps rt info (convert-expr body))
+					   lift-fns))))
+
+  (ProgramDefs (ProgramDefs-info p)
+			   (for/fold ([defs '()]) 
+						 ([def (ProgramDefs-def* p)])
+						 (append (convert-def def) defs))))
+
+  
 ; R4 -> R4
 (define (limit-functions p)
   (define arg-limit (vector-length arg-registers))
