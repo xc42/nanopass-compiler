@@ -70,14 +70,13 @@
 
 ;;apply f to expr recursively
 (define (map-over-expr f expr)
-  (let ([f^ (lambda (e) (map-over-expr f e))])
 	(match expr
-		   [(Prim op es) (Prim op (map f^ es))]
-		   [(If e1 e2 e3) (If (f^ e1) (f^ e2) (f^ e3))]
-		   [(Apply f e) (Apply (f^ f) (f^ e))]
-		   [(Let v e body) (Let (f^ v) (f^ e) (f^ body))]
-		   [(Lambda ps rt body) (Lambda ps rt (f^ body))]
-		   [else expr])))
+		   [(Prim op es) (Prim op (map f es))]
+		   [(If e1 e2 e3) (If (f e1) (f e2) (f e3))]
+		   [(Apply func e) (Apply (f func) (f e))]
+		   [(Let v e body) (Let v (f e) (f body))]
+		   [(Lambda ps rt body) (Lambda ps rt (f body))]
+		   [else expr]))
 
 ;; R5 -> R5
 (define (shrink p)
@@ -136,7 +135,7 @@
 			   [(Lambda ps rt body) 
 				(let ([env-ex (for/fold ([env^ env])
 										([x ps])
-										(extend-env env^ (car x) (gensym (car x))))])
+										(extend-env env^ (car x) (car x)))])
 				(Lambda ps rt ((uniquify-exp env-ex) body)))]))))
   (match p
 		 [(Program info body) (Program info ((uniquify-exp '()) body))]
@@ -190,14 +189,13 @@
   (define (convert-def def)
 	(let ([prefix (string->symbol (~a (Def-name def) "_lambda"))]
 		  [lift-fns '()])
-
 	  (define (convert-expr expr)
 		(match expr
 			   [(Lambda ps rt body) 
 				(let* ([lift-fn-name (gensym prefix)]
 					   [lift-fn (Def lift-fn-name ps rt (Def-info def) (convert-expr body))])
 				  (set! lift-fns (cons lift-fn lift-fns))
-				  (Closure (length ps) (cons (FunRef lift-fn-name) (free-variable expr))))]
+				  (Closure (length ps) (cons (FunRef lift-fn-name) (set->list (free-variable expr)))))]
 			   [else (map-over-expr convert-expr expr)]))
 
 	  (match-let ([(Def name ps rt info body) def])
@@ -205,9 +203,9 @@
 					   lift-fns))))
 
   (ProgramDefs (ProgramDefs-info p)
-			   (for/fold ([defs '()]) 
-						 ([def (ProgramDefs-def* p)])
-						 (append (convert-def def) defs))))
+			   (foldr (lambda (def acc) (append (convert-def def) acc))
+					  '()
+					  (ProgramDefs-def* p))))
 
   
 ; R4 -> R4

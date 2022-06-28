@@ -45,7 +45,8 @@ Changelog:
 (require racket/pretty racket/match)
 (require (for-syntax racket))
 					;(require racket/async-channel)
-(require rackunit rackunit/text-ui rackunit/gui)
+;(require rackunit rackunit/text-ui rackunit/gui)
+(require rackunit rackunit/text-ui)
 
 (define (symbolic? e)
   (match e
@@ -63,7 +64,8 @@ Changelog:
          fun-call? indirect-call?
          read-fixnum read-program 
 	 compile compile-file check-passes-suite interp-tests compiler-tests
-         compiler-tests-gui compiler-tests-suite
+         ;compiler-tests-gui 
+		 compiler-tests-suite
          print-dot print-graph
          use-minimal-set-of-registers!
 	 general-registers num-registers-for-alloc registers-for-alloc
@@ -2125,8 +2127,8 @@ Changelog:
 (define (compiler-tests name typechecker passes test-family test-nums)
   (run-tests (compiler-tests-suite name typechecker passes test-family test-nums) (test-verbosity)))
 
-(define (compiler-tests-gui name typechecker passes test-family test-nums)
-  (test/gui (compiler-tests-suite name typechecker passes test-family test-nums)))
+;(define (compiler-tests-gui name typechecker passes test-family test-nums)
+;  (test/gui (compiler-tests-suite name typechecker passes test-family test-nums)))
 
 
 ;; Takes a function of 1 argument (or #f) and Racket expression, and

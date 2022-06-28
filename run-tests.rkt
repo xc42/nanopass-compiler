@@ -7,6 +7,7 @@
 (require "type-check-Rif.rkt")
 (require "type-check-Rvec.rkt")
 (require "type-check-Rfun.rkt")
+(require "type-check-Rlambda.rkt")
 (require "interp-Cvar.rkt")
 (require "interp-Cif.rkt")
 (require "interp-Cvec.rkt")
@@ -15,6 +16,9 @@
 (require "interp-Rvec-prime.rkt")
 (require "interp-Rfun.rkt")
 (require "interp-Rfun-prime.rkt")
+(require "interp-Rlambda.rkt")
+(require "interp-Rlambda-prime.rkt")
+
 
 (require "interp.rkt")
 (require "compiler.rkt")
@@ -109,10 +113,10 @@
 
 
 (define r5-passes
-  `(("shrink" ,shrink ,interp-Rlambda)
-	("uniquify" ,uniquify ,interp-Rlambda)
-	("reaveal functions" ,reveal-functions ,interp-Rlambda)
-	("closure conversion" ,convert-to-closure ,interp-Rlambda-prime)
+  `(("shrink" ,shrink ,interp-F2)
+	("uniquify" ,uniquify ,interp-F2)
+	("reaveal functions" ,reveal-functions ,interp-F2)
+	("closure conversion" ,convert-to-closure ,interp-F2)
 	;("limit functions" ,limit-functions ,interp-Rlambda)
 	;("expose allocation" ,expose-allocation ,interp-Rlambda-prime)
 	;("remove complex opera*" ,remove-complex-opera* ,interp-Rlambda-prime)
@@ -123,5 +127,5 @@
 	;("patch instructions",patch-instructions ,interp-x86-3) 
 	;("print x86" ,print-x86 #f)
 	))
-(interp-tests "r5" type-check-Rfun r5-passes interp-Rfun "r5_test" (tests-for "r5"))
-(compiler-tests "r5" type-check-Rfun r5-passes "r5_test" (tests-for "r5"))
+(interp-tests "r5" type-check-Rlambda r5-passes interp-Rlambda "r5_test" (tests-for "r5"))
+(compiler-tests "r5" type-check-Rlambda r5-passes "r5_test" (tests-for "r5"))
