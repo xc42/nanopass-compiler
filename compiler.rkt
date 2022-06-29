@@ -1,7 +1,6 @@
 #lang racket
 (require racket/set racket/stream)
 (require racket/fixnum)
-(require "interp-Rint.rkt")
 (require "utilities.rkt")
 (require "type-check-Rfun.rkt")
 (require "type-check-Cfun.rkt")
@@ -177,7 +176,7 @@
 (define (convert-to-closure p)
   (define (free-variable expr)
 	(match expr
-		   [(HasType e t) (free-variable e)]
+		   [(HasType e t) (HasType (free-variable e) t)]
 		   [(Let x e body) (set-union (free-variable e) (set-remove (free-variable body) x))]
 		   [(Lambda ps rty body) (set-subtract (free-variable body) (apply set (map car ps)))]
 		   [(If e1 e2 e3) (apply set-union (map free-variable `(,e1 ,e3 ,e3)))]
@@ -193,19 +192,29 @@
 		(match expr
 			   [(Lambda ps rt body) 
 				(let* ([lift-fn-name (gensym prefix)]
-					   [lift-fn (Def lift-fn-name ps rt (Def-info def) (convert-expr body))])
+					   [fvs (set->list (free-variable expr))]
+					   [clos-name (gensym 'fvs)]
+					   [clos-vec `(Vector ,@(map HasType-type fvs))]
+					   [body^ (let let-header ([fvs* fvs] [idx 0])
+								(if (null? fvs*)
+								  (convert-expr body)
+								  (Let (Var-name (HasType-expr (car fvs*))) 
+									   (Prim 'vector-ref `(,clos-name ,idx))
+									   (let-header (cdr fvs*) (+ 1 idx)))))]
+					   [lift-fn (Def lift-fn-name (cons `(,clos-name : ,clos-vec) ps) rt (Def-info def) body^)])
 				  (set! lift-fns (cons lift-fn lift-fns))
-				  (Closure (length ps) (cons (FunRef lift-fn-name) (set->list (free-variable expr)))))]
+				  (Closure (length ps) (cons (FunRef lift-fn-name) fvs)))]
 			   [else (map-over-expr convert-expr expr)]))
 
 	  (match-let ([(Def name ps rt info body) def])
 				 (cons (Def name ps rt info (convert-expr body))
 					   lift-fns))))
 
-  (ProgramDefs (ProgramDefs-info p)
-			   (foldr (lambda (def acc) (append (convert-def def) acc))
-					  '()
-					  (ProgramDefs-def* p))))
+  (let ([p^ (parameterize ([typed-vars #t]) (type-check-Rlambda p))])
+	(ProgramDefs (ProgramDefs-info p^)
+				 (foldr (lambda (def acc) (append (convert-def def) acc))
+						'()
+						(ProgramDefs-def* p^)))))
 
   
 ; R4 -> R4
