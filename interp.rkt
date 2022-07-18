@@ -1006,6 +1006,7 @@
         #;[`(tagged ,fun-val^ ,t) ;; for dynamically typed
            (apply-fun interp fun-val^ arg-vals)]
         [`(function (,xs ...) ,body ,lam-env)
+		  (unless (= (length xs) (length arg-vals)) (displayln (format "param args not match~nparam(~a):~a~nargs(~a):~a" (length xs) xs (length arg-vals) arg-vals)))
          (define new-env (append (map cons xs arg-vals) lam-env))
          ((interp new-env) body)]
         [else (error 'apply-fun "expected function, not ~a" fun-val)]))
