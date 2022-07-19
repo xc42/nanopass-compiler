@@ -113,7 +113,7 @@
 	("uniquify" ,uniquify ,interp-F2)
 	("reaveal functions" ,reveal-functions ,interp-F2)
 	("closure conversion" ,convert-to-closure ,interp-F2)
-	;("limit functions" ,limit-functions ,interp-F2)
+	("limit functions" ,limit-functions ,interp-F2)
 	;("expose allocation" ,expose-allocation ,interp-Rlambda-prime)
 	;("remove complex opera*" ,remove-complex-opera* ,interp-Rlambda-prime)
 	;("explicate control" ,explicate-control ,interp-Cfun)

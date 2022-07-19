@@ -174,9 +174,29 @@
 						
 
 (define (convert-to-closure p)
+
+  ;;wrap type info of applied function for later use (limit-functions  for overflowd args)
+  (define check-apply-type-class
+	(class type-check-Rlambda-class
+	  (super-new)
+	  (inherit type-check-exp)
+	  (inherit check-type-equal?)
+	  (define/override (type-check-apply env e es)
+		(define-values (e^ ty) ((type-check-exp env) e))
+		(define-values (e* ty*) (for/lists (e* ty*) ([e (in-list es)])
+										   ((type-check-exp env) e)))
+		(match ty
+		  [`(,ty^* ... -> ,rt)
+			(for ([arg-ty ty*] [param-ty ty^*])
+			  (check-type-equal? arg-ty param-ty (Apply e es)))
+			(values (HasType e^ ty) e* rt)]
+		  [else (error 'type-check "expected a function, not ~a" ty)]))))
+
   (define (free-variable expr)
 	(match expr
-	  [(HasType (? Var?) t) (set expr)]
+	  [(? HasType?) (if (Var? (HasType-expr expr))
+					  (set expr)
+					  (free-variable (HasType-expr expr)))]
 	  [(Let x e body) (set-union (free-variable e) (set-remove (free-variable body) x))]
 	  [(Lambda ps rty body) (set-subtract (free-variable body) 
 										  (for/set ([p ps]) (HasType (Var (car p)) (last p))))]
@@ -209,19 +229,21 @@
 				 (add-lift-fn lift-fn)
 				 (Closure (length ps) (cons (FunRef lift-fn-name) fvs)))]
 			  [(Apply f-expr args)
-			   (let ([tmp (gensym 'app_tmp)])
-				 (Let  tmp (convert-expr f-expr)
-					   (Apply (Prim 'vector-ref `(,(Var tmp) ,(Int 0))) (cons (Var tmp) (map convert-expr args)))))]
+			   (let ([tmp (gensym 'clos_tmp)])
+				 (Let  tmp (convert-expr (HasType-expr f-expr))
+					   (Apply (HasType (Prim 'vector-ref `(,(Var tmp),(Int 0))) (HasType-type f-expr))
+							  (cons (Var tmp) (map convert-expr args)))))]
 			  [(FunRefArity name arity) (Closure arity (list (FunRef name)))]
 			  [else (map-over-expr convert-expr expr)]))
 
 		  (match-let ([(Def name ps rt info body) def])
-			(cons (Def name (if (eq? name 'main)
+			(let ([ps^ (if (eq? name 'main)
 							  ps
-							  (cons '(dummy_clos : (Vector _)) ps)) rt info (convert-expr body))
-				  lift-fns))))
+							  (cons '(dummy_clos : (Vector _)) ps))])
+			(cons (Def name ps^ rt info (convert-expr body)) lift-fns)))))
 
-  (let ([p^ (parameterize ([typed-vars #t]) (type-check-Rlambda p))])
+  (let ([p^ (parameterize ([typed-vars #t]) 
+			  (send (new check-apply-type-class) type-check-program p))])
 	(ProgramDefs (ProgramDefs-info p^)
 				 (foldr (lambda (def acc) (append (convert-def def) acc))
 						'()
@@ -234,7 +256,7 @@
 
   ;to pack overflowed args to vector need to know their type
 ;  (define expose-apply-type-class
-;	(class type-check-Rfun-class
+;	(class type-check-Rlambda-class
 ;		   (super-new)
 ;		   (inherit type-check-exp)
 ;		   (inherit check-type-equal?)
@@ -259,29 +281,40 @@
 			 [vec-param (gensym 'auto-vec-param)])
 
 		(define ((subst targets) expr)
+		  (let ([subst^ (subst targets)]
+				[strip-type* (lambda (expr) (if (HasType? expr) (HasType-expr expr) expr))])
 			(match expr
 			  [(Var v)
 			   (let ([idx (index-where targets (lambda (ts) (eq? (car ts) v)))])
 				 (if idx
 				   (Prim 'vector-ref (list (Var vec-param) (Int idx)))
 				   expr))]
-			  [(HasType e t) (HasType ((subst targets) e) t)]
-			  [(Let x e body) (Let x ((subst targets) e) ((subst (remove x targets)) body))]
-			  [(If e1 e2 e3) (If ((subst targets) e1) ((subst targets) e2) ((subst targets) e3))]
-			  [(Prim op rands) (Prim op (map (subst targets) rands))]
+			  [(HasType e t) (HasType (subst^ e) t)]
+			  [(Let x e body) (Let x (subst^ e) ((subst (remove x targets)) body))]
+			  [(If e1 e2 e3) (If (subst^ e1) (subst^ e2) (subst^ e3))]
+			  [(Prim op rands) (Prim op (map subst^ rands))]
 			  [(Apply f args) 
-			   (let ([subst.strip (compose (subst targets) HasType-expr)])
-				 (Apply 
-				   ((subst targets) f) 
-				   (if (> (length args) arg-limit)
-					 (let ([rest-args (list-tail args (- arg-limit 1))])
-					   `(,@(map subst.strip (take args (- arg-limit 1)))
-						  ,(HasType 
-							 (Prim 'vector (map subst.strip rest-args))
-							 `(Vector ,@(map HasType-type rest-args)))))
-					 (map subst.strip args))))]
-			  [(Closure arity `(,f ,fvs ...)) (Closure arity (cons f (map (subst targets) fvs)))]
-			  [else expr]))
+			   (let ([l (length args)]
+					 [strip.subst (compose strip-type* subst^)])
+				 (let-values ([(normal-args overflw-args overflw-ts)
+							   (if (> l arg-limit)
+								 (values 
+								   (take args (- arg-limit 1))
+								   (drop args (- arg-limit 1))
+								   (match (HasType-type f)
+									 [`(,ps ... -> ,rt) (drop ps (- arg-limit 2))])) ;;because of the inserted closure arg, need to drop one more
+								 (values args '() '()))])
+
+				   (Apply 
+					 (subst^ (HasType-expr f))
+					 (append (map strip.subst normal-args) 
+							 (let ([arg-pack (map strip.subst overflw-args)])
+							   (if (null? arg-pack)
+								 '()
+								 `(,(HasType (Prim 'vector arg-pack) `(Vector ,@overflw-ts)))))))))]
+				   
+			  [(Closure arity `(,f ,fvs ...)) (Closure arity (cons f (map subst^ fvs)))]
+			  [else expr])))
 		(Def fn 
 			 (if (> (length ps) arg-limit)
 			   (append (take ps (- arg-limit 1)) 
