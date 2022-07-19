@@ -114,7 +114,7 @@
 	("reaveal functions" ,reveal-functions ,interp-F2)
 	("closure conversion" ,convert-to-closure ,interp-F2)
 	("limit functions" ,limit-functions ,interp-F2)
-	;("expose allocation" ,expose-allocation ,interp-Rlambda-prime)
+	("expose allocation" ,expose-allocation ,interp-F2)
 	;("remove complex opera*" ,remove-complex-opera* ,interp-Rlambda-prime)
 	;("explicate control" ,explicate-control ,interp-Cfun)
 	;("instruction selection" ,select-instructions ,interp-pseudo-x86-3)

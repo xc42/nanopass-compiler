@@ -333,13 +333,14 @@
 (define (expose-allocation p)
   (define (calc-vec-bytes-needed ts)
 	(+ 8 ;for vector tag header
-	   (foldl 
-		 (lambda (t n)
-		   (if (pair? t)
-			   (+ n (calc-vec-bytes-needed (cdr t)))
-			   (+ n 8)))
-		 0
-		 ts)))
+	   (for/fold
+		 ([acc 0])
+		 ([t ts])
+		 (+ acc
+			(match t
+			  ['Integer 8]
+			  [`(,ps ... -> ,ts) 8]
+			  [`(Vector ,ts ...) (calc-vec-bytes-needed (cdr t))])))))
 
   (define (nested-let-expr vs es body)
 	(if (null? es)
@@ -348,35 +349,49 @@
 			(Let (car vs) (car es) (nested-let-expr (cdr vs) (cdr es) body))
 			(Let vs (car es) (nested-let-expr vs (cdr es) body)))))
 
+  (define (do-allocate es ts bytes alloc-expr)
+	(let* ([vs (map (lambda (x) (gensym 'vec-init)) es)]
+		   [len (length vs)]
+		   [assign-body 
+			 (let ([var-vec (gensym 'alloc)])
+			   (Let  
+				 var-vec alloc-expr
+				 (nested-let-expr 
+				   '_ 
+				   (let all-assign ([idx 0] [vs* vs])
+					 (if (null? vs*)
+					   '()
+					   (cons (Prim 'vector-set! `(,(Var var-vec) ,(Int idx) ,(Var (car vs*))))
+							 (all-assign (+ idx 1) (cdr vs*))))) 
+				   (Var var-vec))))]
+		   [alloc-body
+			 (Let '_ 
+				  (If (Prim '< 
+							(list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Int bytes)))
+								  (GlobalValue 'fromspace_end)))
+					  (Void)
+					  (Collect bytes))
+				  assign-body)])
+	  (nested-let-expr vs (map expose-allocation-expr es) alloc-body)))
+
+
   (define (expose-allocation-expr expr)
 	(match expr
 		   [(Prim op es) (Prim op (map expose-allocation-expr es))]
 		   [(If pred thn els) (If (expose-allocation-expr pred) (expose-allocation-expr thn) (expose-allocation-expr els))]
 		   [(Let v e body) (Let v (expose-allocation-expr e) (expose-allocation-expr body))]
 		   [(Apply f args) (Apply f (map expose-allocation-expr args))]
-		   [(HasType (Prim 'vector es) ts)
-			(let* ([vs (map (lambda (x) (gensym 'vec-init)) es)]
-				   [bytes (calc-vec-bytes-needed (cdr ts))]
-				   [len (length vs)]
-				   [assign-body 
-					 (let ([var-vec (gensym 'alloc)])
-					   (Let  var-vec (Allocate len ts)
-							 (nested-let-expr '_ 
-											  (let all-assign ([idx 0] [vs* vs])
-												(if (null? vs*)
-													'()
-													(cons (Prim 'vector-set! `(,(Var var-vec) ,(Int idx) ,(Var (car vs*))))
-														  (all-assign (+ idx 1) (cdr vs*))))) 
-											  (Var var-vec))))]
-				   [alloc-body
-					 (Let '_ 
-						  (If (Prim '< 
-									(list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Int bytes)))
-										  (GlobalValue 'fromspace_end)))
-							  (Void)
-							  (Collect bytes))
-						  assign-body)])
-			  (nested-let-expr vs (map expose-allocation-expr es) alloc-body))]
+		   [(HasType (Prim 'vector es) ts) (do-allocate es ts (calc-vec-bytes-needed (cdr ts)) (Allocate (length es) ts))]
+		   [(Closure arity es) 
+			(let-values ([(es^ ts) 
+						  (for/lists (es ts) 
+									 ([e (cdr es)])
+									 (values (HasType-expr e) (HasType-type e)))]) 
+			  (let ([bytes (+ 8 (calc-vec-bytes-needed ts))]) ;add function pointer size (+ 8)
+				(do-allocate (cons (car es) es^) 
+							 (cons '(_ -> _) ts)
+							 bytes
+							 (AllocateClosure bytes `(Vector ,@ts) arity))))]
 		   [atm-expr atm-expr]))
 
   (match p
