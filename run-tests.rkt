@@ -14,6 +14,7 @@
 (require "interp-Rfun.rkt")
 (require "interp-Rfun-prime.rkt")
 (require "interp-Rlambda.rkt")
+(require "interp-Clambda.rkt")
 
 
 (require "interp.rkt")
@@ -115,9 +116,9 @@
 	("closure conversion" ,convert-to-closure ,interp-F2)
 	("limit functions" ,limit-functions ,interp-F2)
 	("expose allocation" ,expose-allocation ,interp-F2)
-	;("remove complex opera*" ,remove-complex-opera* ,interp-Rlambda-prime)
-	;("explicate control" ,explicate-control ,interp-Cfun)
-	;("instruction selection" ,select-instructions ,interp-pseudo-x86-3)
+	("remove complex opera*" ,remove-complex-opera* ,interp-F2)
+	("explicate control" ,explicate-control ,interp-Clambda)
+	("instruction selection" ,select-instructions ,interp-pseudo-x86-3)
 	;("remove jumps" ,remove-jumps ,interp-pseudo-x86-3)
 	;("allocate register" ,(lambda (p) (allocate-register (build-interference (uncover-live p)))) ,interp-pseudo-x86-3)
 	;("patch instructions",patch-instructions ,interp-x86-3) 

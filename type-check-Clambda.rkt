@@ -1,5 +1,4 @@
 #lang racket
-(require "utilities.rkt")
 (require "type-check-Cvar.rkt")
 (require "type-check-Cif.rkt")
 (require "type-check-Cvec.rkt")

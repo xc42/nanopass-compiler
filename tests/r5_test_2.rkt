@@ -9,3 +9,4 @@
 
 
 ((composeFunc (addN 5) (addN 7)) 11)
+;((addN 5) 11)

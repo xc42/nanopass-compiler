@@ -2,7 +2,7 @@
 (require racket/set racket/stream)
 (require racket/fixnum)
 (require "utilities.rkt")
-(require "type-check-Cfun.rkt")
+(require "type-check-Clambda.rkt")
 (require "type-check-Rlambda.rkt")
 (require (prefix-in runtime-config:: "runtime-config.rkt"))
 (require graph)
@@ -176,21 +176,21 @@
 (define (convert-to-closure p)
 
   ;;wrap type info of applied function for later use (limit-functions  for overflowd args)
-  (define check-apply-type-class
-	(class type-check-Rlambda-class
-	  (super-new)
-	  (inherit type-check-exp)
-	  (inherit check-type-equal?)
-	  (define/override (type-check-apply env e es)
-		(define-values (e^ ty) ((type-check-exp env) e))
-		(define-values (e* ty*) (for/lists (e* ty*) ([e (in-list es)])
-										   ((type-check-exp env) e)))
-		(match ty
-		  [`(,ty^* ... -> ,rt)
-			(for ([arg-ty ty*] [param-ty ty^*])
-			  (check-type-equal? arg-ty param-ty (Apply e es)))
-			(values (HasType e^ ty) e* rt)]
-		  [else (error 'type-check "expected a function, not ~a" ty)]))))
+;  (define check-apply-type-class
+;	(class type-check-Rlambda-class
+;	  (super-new)
+;	  (inherit type-check-exp)
+;	  (inherit check-type-equal?)
+;	  (define/override (type-check-apply env e es)
+;		(define-values (e^ ty) ((type-check-exp env) e))
+;		(define-values (e* ty*) (for/lists (e* ty*) ([e (in-list es)])
+;										   ((type-check-exp env) e)))
+;		(match ty
+;		  [`(,ty^* ... -> ,rt)
+;			(for ([arg-ty ty*] [param-ty ty^*])
+;			  (check-type-equal? arg-ty param-ty (Apply e es)))
+;			(values (HasType e^ ty) e* rt)]
+;		  [else (error 'type-check "expected a function, not ~a" ty)]))))
 
   (define (free-variable expr)
 	(match expr
@@ -205,6 +205,14 @@
 	  [(Prim op es) (apply set-union (map free-variable es))]
 	  [else (set)]))
 
+  (define (convert-func-type rt)
+	(match rt
+	  [`(,ps ... -> ,rt*) `(Vector ((Vector _) ,@(map convert-func-type ps) -> ,rt*))] ;;convert function type to closure type
+	  [else rt]))
+
+  (define (convert-param-func-type ps)
+	(match ps
+	  [`([,xs : ,ts] ...) (for/list ([x xs] [t ts]) `(,x : ,(convert-func-type t)))]))
 		
   (define (convert-def def)
 	(let* ([lam-prefix (string->symbol (~a (Def-name def) "_lambda"))]
@@ -212,122 +220,128 @@
 		   [add-lift-fn (lambda (def)
 						  (set! lift-fns (cons def lift-fns)))])
 
-		  (define (convert-expr expr)
-			(match expr
-			  [(Lambda ps rt body) 
-			   (let* ([lift-fn-name (gensym lam-prefix)]
-					  [fvs (set->list (free-variable expr))] 
-					  [clos-param (Var (gensym 'clos))]
-					  [clos-type `(Vector _ ,@(map HasType-type fvs))]
-					  [body^ (let let-header ([fvs* fvs] [idx 1])
-							   (if (null? fvs*)
-								 (convert-expr body)
-								 (Let (Var-name (HasType-expr (car fvs*))) 
-									  (Prim 'vector-ref `(,clos-param ,(Int idx)))
-									  (let-header (cdr fvs*) (+ 1 idx)))))]
-					  [lift-fn (Def lift-fn-name (cons `(,(Var-name clos-param) : ,clos-type) ps) rt (Def-info def) body^)])
-				 (add-lift-fn lift-fn)
-				 (Closure (length ps) (cons (FunRef lift-fn-name) fvs)))]
-			  [(Apply f-expr args)
-			   (let ([tmp (gensym 'clos_tmp)])
-				 (Let  tmp (convert-expr (HasType-expr f-expr))
-					   (Apply (HasType (Prim 'vector-ref `(,(Var tmp),(Int 0))) (HasType-type f-expr))
-							  (cons (Var tmp) (map convert-expr args)))))]
-			  [(FunRefArity name arity) (Closure arity (list (FunRef name)))]
-			  [else (map-over-expr convert-expr expr)]))
 
-		  (match-let ([(Def name ps rt info body) def])
-			(let ([ps^ (if (eq? name 'main)
-							  ps
-							  (cons '(dummy_clos : (Vector _)) ps))])
-			(cons (Def name ps^ rt info (convert-expr body)) lift-fns)))))
+	  (define (convert-expr expr)
+		(match expr
+		  [(Lambda ps rt body) 
+		   (let* ([lift-fn-name (gensym lam-prefix)]
+				  [fvs 
+					(for/list ([fv (free-variable expr)])
+					  (HasType (HasType-expr fv) (convert-func-type (HasType-type fv))))]
+				  [clos-param (Var (gensym 'clos))]
+				  [clos-type `(Vector _ ,@(map HasType-type fvs))]
+				  [body^ 
+					(let let-header ([fvs* fvs] [idx 1])
+					  (if (null? fvs*)
+						(convert-expr body)
+						(Let (Var-name (HasType-expr (car fvs*))) 
+							 (Prim 'vector-ref `(,clos-param ,(Int idx)))
+							 (let-header (cdr fvs*) (+ 1 idx)))))]
+				  [lift-fn 
+					(Def lift-fn-name 
+						 (cons `(,(Var-name clos-param) : ,clos-type) (convert-param-func-type ps))
+						 (convert-func-type rt) 
+						 '() 
+						 body^)])
 
-  (let ([p^ (parameterize ([typed-vars #t]) 
-			  (send (new check-apply-type-class) type-check-program p))])
-	(ProgramDefs (ProgramDefs-info p^)
-				 (foldr (lambda (def acc) (append (convert-def def) acc))
-						'()
-						(ProgramDefs-def* p^)))))
+			 (add-lift-fn lift-fn)
+			 (Closure (length ps) (cons (FunRef lift-fn-name) fvs)))]
+
+		  [(Apply f-expr args)
+		   (let ([tmp (gensym 'clos_tmp)])
+			 (Let  tmp (convert-expr f-expr)
+				   (Apply (Prim 'vector-ref `(,(Var tmp),(Int 0)))
+						  (cons (Var tmp) (map convert-expr args)))))]
+
+		  [(FunRefArity name arity) (Closure arity (list (FunRef name)))]
+		  [else (map-over-expr convert-expr expr)]))
+
+	  (match-let ([(Def name ps rt info body) def])
+		(let ([ps^ (convert-param-func-type
+						(if (eq? name 'main)
+						  ps
+						  (cons '(dummy_clos : (Vector _)) ps)))]
+			  [rt^ (convert-func-type rt)]
+			  [body^ (convert-expr body)])
+		  (cons (Def name ps^ rt^ info body^) lift-fns)))))
+
+  (let* ([type-check
+		   (lambda (p)
+			 (parameterize ([typed-vars #t]) 
+			   (send (new type-check-Rlambda-class) type-check-program p)))]
+		 [p^ (type-check p)])
+	(type-check ;;type-check again to "correct" type inconsistency of closure type(aka. vector) and function
+	  (ProgramDefs (ProgramDefs-info p^)
+				   (foldr (lambda (def acc) (append (convert-def def) acc))
+						  '()
+						  (ProgramDefs-def* p^))))))
 
   
-; R4 -> R4
+; R5 -> R5
 (define (limit-functions p)
   (define arg-limit (vector-length arg-registers))
 
   ;to pack overflowed args to vector need to know their type
-;  (define expose-apply-type-class
-;	(class type-check-Rlambda-class
-;		   (super-new)
-;		   (inherit type-check-exp)
-;		   (inherit check-type-equal?)
-;		   (define/override (type-check-apply env e es)
-;						  (let-values ([(e^ ty) ((type-check-exp env) e)]
-;									   [(e* ty*) (for/lists (e* ty*) ([e (in-list es)])
-;															((type-check-exp env) e))])
-;							(match ty
-;								   [`(,ty^* ... -> ,rt)
-;									 (for ([arg-ty ty*] [param-ty ty^*])
-;										  (check-type-equal? arg-ty param-ty (Apply e es)))
-;									 (values e^ (map HasType e* ty*) rt)]
-;								   [else (error 'type-check "expected a function, not ~a" ty)])))))
+  (define expose-apply-type-class
+	(class type-check-Rlambda-class
+		   (super-new)
+		   (inherit type-check-exp)
+		   (inherit check-type-equal?)
+		   (define/override (type-check-apply env e es)
+						  (let-values ([(e^ ty) ((type-check-exp env) e)]
+									   [(e* ty*) (for/lists (e* ty*) ([e (in-list es)])
+															((type-check-exp env) e))])
+							(match ty
+								   [`(,ty^* ... -> ,rt) 
+									 (for ([arg-ty ty*] [param-ty ty^*])
+										  (check-type-equal? arg-ty param-ty (Apply e es)))
+									 (values e^ (map HasType e* ty*) rt)]
+								   [else (error 'type-check "expected a function, not ~a" ty)])))))
 		  
-	
-  (define (limit-Def def)
-	(match-let 
-	  ([(Def fn ps rt info expr) def])
-	  (let* ([param-tails (if (> (length ps) arg-limit) 
-							(list-tail ps (- arg-limit 1))
-							'())]
-			 [vec-param (gensym 'auto-vec-param)])
+  (define (limit-def def)
 
-		(define ((subst targets) expr)
-		  (let ([subst^ (subst targets)]
-				[strip-type* (lambda (expr) (if (HasType? expr) (HasType-expr expr) expr))])
-			(match expr
-			  [(Var v)
-			   (let ([idx (index-where targets (lambda (ts) (eq? (car ts) v)))])
-				 (if idx
-				   (Prim 'vector-ref (list (Var vec-param) (Int idx)))
-				   expr))]
-			  [(HasType e t) (HasType (subst^ e) t)]
-			  [(Let x e body) (Let x (subst^ e) ((subst (remove x targets)) body))]
-			  [(If e1 e2 e3) (If (subst^ e1) (subst^ e2) (subst^ e3))]
-			  [(Prim op rands) (Prim op (map subst^ rands))]
-			  [(Apply f args) 
-			   (let ([l (length args)]
-					 [strip.subst (compose strip-type* subst^)])
-				 (let-values ([(normal-args overflw-args overflw-ts)
-							   (if (> l arg-limit)
-								 (values 
-								   (take args (- arg-limit 1))
-								   (drop args (- arg-limit 1))
-								   (match (HasType-type f)
-									 [`(,ps ... -> ,rt) (drop ps (- arg-limit 2))])) ;;because of the inserted closure arg, need to drop one more
-								 (values args '() '()))])
+	(define (limit-apply expr)
+	  (match expr
+		[(Apply f args)
+		 (let ([f^ (limit-apply f)]
+			   [args^ (map limit-apply args)])
+		   (if (<= (length args^) arg-limit)
+			 (Apply f^ args^)
+			 (let* ([head (take args^ (- arg-limit 1))]
+					[tail (drop args^ (- arg-limit 1))]
+					[vec-arg (HasType (Prim 'vector (map HasType-expr tail))  ;;wrap HasType for expose-allocation pass
+									  `(Vector ,@(map HasType-type tail)))])
+			   (Apply f^ (append head `(,vec-arg))))))]
+		[else (map-over-expr limit-apply expr)])) ;;limit-apply
 
-				   (Apply 
-					 (subst^ (HasType-expr f))
-					 (append (map strip.subst normal-args) 
-							 (let ([arg-pack (map strip.subst overflw-args)])
-							   (if (null? arg-pack)
-								 '()
-								 `(,(HasType (Prim 'vector arg-pack) `(Vector ,@overflw-ts)))))))))]
-				   
-			  [(Closure arity `(,f ,fvs ...)) (Closure arity (cons f (map subst^ fvs)))]
-			  [else expr])))
-		(Def fn 
-			 (if (> (length ps) arg-limit)
-			   (append (take ps (- arg-limit 1)) 
-					   `((,vec-param : ,(cons 'Vector (map last param-tails)))))
-			   ps)
-			 rt
-			 info
-			 ((subst param-tails) expr)))))
+	(define (limit-def^ ps body)
+	  (let* ([head (take ps (- arg-limit 1))]
+			 [tail (drop ps (- arg-limit 1))]
+			 [vec-param (gensym 'auto-vec-param)]
+			 [vec-ts (match tail 
+					   [`([,xs : ,ts] ...) '(Vector ,@ts)])]
+			 [ps^ (append head `((,vec-param : ,vec-ts)))]
+			 [body^
+			   (let let-header ([tl tail]  [idx 0])
+				 (if (null? tl)
+				   (limit-apply body)
+				   (Let (caar tl) (Prim 'vector-ref `(,(Var vec-param) ,(Int idx)))
+						(let-header (cdr tl) (+ idx 1)))))])
+		(values ps^ body^)))
 
-  ;(let ([p^ (send (new expose-apply-type-class) type-check-program p)])
-	(match p
-		   [(? Program?) p]
-		   [(ProgramDefs info defs) (ProgramDefs info (map limit-Def defs))]))
+
+	(match-let ([(Def fn ps rt info body) def])
+	  (if (<= (length ps) arg-limit)
+		(Def fn ps rt info (limit-apply body))
+		(let-values ([(ps^ body^) (limit-def^ ps body)])
+		  (Def fn ps^ rt info body^)))))
+
+
+  (let ([p^ (parameterize ([typed-vars #t]) ;;note: to preserve type info (HasType free var) in Closure
+			  (send (new expose-apply-type-class) type-check-program p))])
+	(match p^
+		   [(? Program?) p^]
+		   [(ProgramDefs info defs) (ProgramDefs info (map limit-def defs))])))
 
 
 (define (expose-allocation p)
@@ -381,17 +395,19 @@
 		   [(If pred thn els) (If (expose-allocation-expr pred) (expose-allocation-expr thn) (expose-allocation-expr els))]
 		   [(Let v e body) (Let v (expose-allocation-expr e) (expose-allocation-expr body))]
 		   [(Apply f args) (Apply f (map expose-allocation-expr args))]
-		   [(HasType (Prim 'vector es) ts) (do-allocate es ts (calc-vec-bytes-needed (cdr ts)) (Allocate (length es) ts))]
+		   [(HasType (Prim 'vector es) ts) 
+			(let ([bytes (calc-vec-bytes-needed (cdr ts))]) 
+			  (do-allocate es ts bytes (Allocate bytes ts)))]
+		   [(HasType e t) (expose-allocation-expr e)]
 		   [(Closure arity es) 
-			(let-values ([(es^ ts) 
+			(let-values ([(es* ts*) 
 						  (for/lists (es ts) 
-									 ([e (cdr es)])
+									 ([e (cdr es)]) ;;note: only check free vars' type
 									 (values (HasType-expr e) (HasType-type e)))]) 
-			  (let ([bytes (+ 8 (calc-vec-bytes-needed ts))]) ;add function pointer size (+ 8)
-				(do-allocate (cons (car es) es^) 
-							 (cons '(_ -> _) ts)
-							 bytes
-							 (AllocateClosure bytes `(Vector ,@ts) arity))))]
+			  (let ([bytes (+ 8 (calc-vec-bytes-needed ts*))] ;add function pointer size (+ 8)
+					[es^ (cons (car es) es*)]
+					[ts^ (cons '(_ -> _) ts*)])
+				(do-allocate es^ ts^ bytes (AllocateClosure bytes `(Vector ,@ts^) arity))))]
 		   [atm-expr atm-expr]))
 
   (match p
@@ -507,11 +523,12 @@
 	  [(Bool b) b]
 	  [(Int n) n]))
 
-  (define (get-vec-tag len ts)
-	(let ([mask (let pointer-mask ([ts* (cdr ts)])
+  (define (get-vec-tag vec-ts)
+	(let ([mask (let pointer-mask ([ts* (cdr vec-ts)])
 				 (if (null? ts*)
 					 0
-					 (bitwise-ior (arithmetic-shift (pointer-mask (cdr ts*)) 1) (if (pair? (car ts)) 1 0))))]
+					 (bitwise-ior (arithmetic-shift (pointer-mask (cdr ts*)) 1) (if (pair? (car vec-ts)) 1 0))))]
+		  [len (length (cdr vec-ts))]
 		  [<< arithmetic-shift]
 		  [|| bitwise-ior])
 	  ((mask . << . 7) . || . ((len . << . 1) . || . 0))))
@@ -583,10 +600,10 @@
 			  [else `(,(Instr 'cmpq `(,(to-X86-val e2) ,(to-X86-val e1))) 
 					  ,(Instr 'set (list cc (ByteReg 'al))) 
 					  ,(Instr 'movzbq (list (ByteReg 'al) dst)))]))]
-		 [(Allocate len ts)
+		 [(or (Allocate bytes ts) (AllocateClosure bytes ts _))
 		  (list (Instr 'movq `(,(Global 'free_ptr) ,(Reg 'r11)))
-				(Instr 'addq `(,(Imm (* 8 (+ len 1))) ,(Global 'free_ptr)))
-				(Instr 'movq `(,(Imm (get-vec-tag len ts)) ,(Deref 'r11 0)))
+				(Instr 'addq `(,(Imm bytes) ,(Global 'free_ptr)))
+				(Instr 'movq `(,(Imm (get-vec-tag ts)) ,(Deref 'r11 0)))
 				(Instr 'movq `(,(Reg 'r11) ,dst)))]
 		 [(Collect bytes)
 		  (list (Instr 'movq `(,(Reg rootstack-reg) ,(Global 'rootstack_end))) ;;mannually spill rootstack-reg to memory
@@ -653,8 +670,17 @@
 											 (Block '() (trans-stmts stmts))))))])
 				 (Def fn ps rt info^ CFG^))))
 
+  (define lenient-type-checker-for-closure 
+	(class type-check-Clambda-class
+	  (super-new)
+	  (inherit type-check-exp)
+	  (define/override (type-equal? clos-tp fun-tp)
+					   (match* (clos-tp fun-tp)
+						 [(`(Vector (,clo-ps ... -> ,clos-rt) ,fvs-tp ...) `(,ps ... -> ,rt)) #t]
+						 [(_ __) (super type-equal? clos-tp fun-tp)]))))
 
-  (match (type-check-Cfun p)
+
+  (match (send (new lenient-type-checker-for-closure) type-check-program p)
 	[(CProgram info CFG) 
 	 (X86Program (cons `(num-root-spills . ,(num-root-spills info)) info)
 				 (for/list ([bb CFG]) 
