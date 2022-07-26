@@ -71,7 +71,7 @@
 	(match expr
 		   [(Prim op es) (Prim op (map f es))]
 		   [(If e1 e2 e3) (If (f e1) (f e2) (f e3))]
-		   [(Apply func e) (Apply (f func) (f e))]
+		   [(Apply func args) (Apply (f func) (map f args))]
 		   [(Let v e body) (Let v (f e) (f body))]
 		   [(Lambda ps rt body) (Lambda ps rt (f body))]
 		   [(HasType e t) (HasType (f e) t)]
@@ -294,8 +294,10 @@
 							(match ty
 								   [`(,ty^* ... -> ,rt) 
 									 (for ([arg-ty ty*] [param-ty ty^*])
-										  (check-type-equal? arg-ty param-ty (Apply e es)))
-									 (values e^ (map HasType e* ty*) rt)]
+									   (check-type-equal? arg-ty param-ty (Apply e es)))
+									 (let ([args^ (for/list ([e e*] [ty ty*])
+												   (if (HasType? e) e (HasType e ty)))])
+									   (values e^ args^ rt))]
 								   [else (error 'type-check "expected a function, not ~a" ty)])))))
 		  
   (define (limit-def def)
@@ -309,8 +311,7 @@
 			 (Apply f^ args^)
 			 (let* ([head (take args^ (- arg-limit 1))]
 					[tail (drop args^ (- arg-limit 1))]
-					[vec-arg (HasType (Prim 'vector (map HasType-expr tail))  ;;wrap HasType for expose-allocation pass
-									  `(Vector ,@(map HasType-type tail)))])
+					[vec-arg (HasType (Prim 'vector tail) `(Vector ,@(map HasType-type tail)))]);;wrap vector with HasType for expose-allocation pass
 			   (Apply f^ (append head `(,vec-arg))))))]
 		[else (map-over-expr limit-apply expr)])) ;;limit-apply
 
@@ -319,7 +320,7 @@
 			 [tail (drop ps (- arg-limit 1))]
 			 [vec-param (gensym 'auto-vec-param)]
 			 [vec-ts (match tail 
-					   [`([,xs : ,ts] ...) '(Vector ,@ts)])]
+					   [`([,xs : ,ts] ...) `(Vector ,@ts)])]
 			 [ps^ (append head `((,vec-param : ,vec-ts)))]
 			 [body^
 			   (let let-header ([tl tail]  [idx 0])
@@ -337,24 +338,21 @@
 		  (Def fn ps^ rt info body^)))))
 
 
-  (let ([p^ (parameterize ([typed-vars #t]) ;;note: to preserve type info (HasType free var) in Closure
-			  (send (new expose-apply-type-class) type-check-program p))])
+  (let* ([type-check (lambda (p) 
+					  (parameterize ([typed-vars #t]) ;;note: to preserve type info (HasType free var) in Closure
+						(send (new expose-apply-type-class) type-check-program p)))]
+		[p^ (type-check p)])
 	(match p^
 		   [(? Program?) p^]
-		   [(ProgramDefs info defs) (ProgramDefs info (map limit-def defs))])))
+		   [(ProgramDefs info defs) (type-check (ProgramDefs info (map limit-def defs)))])))
 
 
 (define (expose-allocation p)
-  (define (calc-vec-bytes-needed ts)
-	(+ 8 ;for vector tag header
-	   (for/fold
-		 ([acc 0])
-		 ([t ts])
-		 (+ acc
-			(match t
-			  ['Integer 8]
-			  [`(,ps ... -> ,ts) 8]
-			  [`(Vector ,ts ...) (calc-vec-bytes-needed (cdr t))])))))
+  (define (calc-bytes-needed t)
+	(match t
+	  ['Integer 8]
+	  [`(,ps ... -> ,ts) 8] ;;function pointer
+	  [`(Vector ,ts ...) (for/fold ([acc 8]) ([t* ts]) (+ acc (calc-bytes-needed t*)))]))
 
   (define (nested-let-expr vs es body)
 	(if (null? es)
@@ -363,7 +361,7 @@
 			(Let (car vs) (car es) (nested-let-expr (cdr vs) (cdr es) body))
 			(Let vs (car es) (nested-let-expr vs (cdr es) body)))))
 
-  (define (do-allocate es ts bytes alloc-expr)
+  (define (do-allocate es bytes alloc-expr)
 	(let* ([vs (map (lambda (x) (gensym 'vec-init)) es)]
 		   [len (length vs)]
 		   [assign-body 
@@ -391,32 +389,26 @@
 
   (define (expose-allocation-expr expr)
 	(match expr
-		   [(Prim op es) (Prim op (map expose-allocation-expr es))]
-		   [(If pred thn els) (If (expose-allocation-expr pred) (expose-allocation-expr thn) (expose-allocation-expr els))]
-		   [(Let v e body) (Let v (expose-allocation-expr e) (expose-allocation-expr body))]
-		   [(Apply f args) (Apply f (map expose-allocation-expr args))]
-		   [(HasType (Prim 'vector es) ts) 
-			(let ([bytes (calc-vec-bytes-needed (cdr ts))]) 
-			  (do-allocate es ts bytes (Allocate bytes ts)))]
-		   [(HasType e t) (expose-allocation-expr e)]
-		   [(Closure arity es) 
-			(let-values ([(es* ts*) 
-						  (for/lists (es ts) 
-									 ([e (cdr es)]) ;;note: only check free vars' type
-									 (values (HasType-expr e) (HasType-type e)))]) 
-			  (let ([bytes (+ 8 (calc-vec-bytes-needed ts*))] ;add function pointer size (+ 8)
-					[es^ (cons (car es) es*)]
-					[ts^ (cons '(_ -> _) ts*)])
-				(do-allocate es^ ts^ bytes (AllocateClosure bytes `(Vector ,@ts^) arity))))]
-		   [atm-expr atm-expr]))
+	  [(HasType (Prim 'vector es) ts) 
+	   (let ([bytes (calc-bytes-needed ts)])
+		 (do-allocate es bytes (Allocate bytes ts)))]
+	  [(HasType (Closure arity es) ts)
+	   (let ([bytes (calc-bytes-needed ts)])
+		 (do-allocate es bytes (AllocateClosure bytes ts arity)))]
+	  [else (map-over-expr expose-allocation-expr expr)]))
+
+  (define (unwarp-HasType expr)
+	(match expr
+	  [(HasType e t) (unwarp-HasType e)]
+	  [else (map-over-expr unwarp-HasType expr)]))
 
   (match p
-		 [(Program info e) (Program info (expose-allocation-expr e))]
-		 [(? ProgramDefs?) (map-program-def-body expose-allocation-expr p)]))
+	[(Program info e) (Program info (expose-allocation-expr e))]
+	[(? ProgramDefs?) (map-program-def-body (compose unwarp-HasType expose-allocation-expr) p)]))
 																				  
 
 			
-;; remove-complex-opera* : R4 -> R4
+;; remove-complex-opera* : R5 -> R5
 (define (remove-complex-opera* p)
   (define (nested-let es rand-acc inner-most)
 		   (if (null? es)
@@ -511,13 +503,15 @@
 
 ;; select-instructions : C0 -> pseudo-x86
 (define (select-instructions p)
+
   (define (constant? e)
 	(or (Int? e) (Bool? e)))
+
   (define (to-X86-val e)
 	(match e
-		   [(Int n) (Imm n)]
-		   [(Bool b) (Imm (if b 1 0))]
-		   [else e]))
+	  [(Int n) (Imm n)]
+	  [(Bool b) (Imm (if b 1 0))]
+	  [else e]))
   (define (get-const-val r2)
 	(match r2
 	  [(Bool b) b]
@@ -525,167 +519,159 @@
 
   (define (get-vec-tag vec-ts)
 	(let ([mask (let pointer-mask ([ts* (cdr vec-ts)])
-				 (if (null? ts*)
-					 0
-					 (bitwise-ior (arithmetic-shift (pointer-mask (cdr ts*)) 1) (if (pair? (car vec-ts)) 1 0))))]
+				  (if (null? ts*)
+					0
+					(bitwise-ior (arithmetic-shift (pointer-mask (cdr ts*)) 1) (if (pair? (car vec-ts)) 1 0))))]
 		  [len (length (cdr vec-ts))]
 		  [<< arithmetic-shift]
 		  [|| bitwise-ior])
 	  ((mask . << . 7) . || . ((len . << . 1) . || . 0))))
-				  
+
   (define (push-args args)
 	(for/list ([arg args]
 			   [r arg-registers])
-			  (Instr 'movq (list (to-X86-val arg) (Reg r)))))
+	  (Instr 'movq (list (to-X86-val arg) (Reg r)))))
 
   (define (cmpop->flag op)
 	(match op
-		   ['eq?  (cons equal? 'e)]
-		   ['< (cons < 'l)]
-		   ['<= (cons <= 'le)]
-		   ['> (cons > 'g)]
-		   ['>= (cons >= 'ge)]))
+	  ['eq?  (cons equal? 'e)]
+	  ['< (cons < 'l)]
+	  ['<= (cons <= 'le)]
+	  ['> (cons > 'g)]
+	  ['>= (cons >= 'ge)]))
 
   (define (trans-assign stmt)
 	(match-let ([(Assign dst expr) stmt])
-	   (match expr
-		 [(Int n) `(,(Instr 'movq (list (Imm n) dst)))]
-		 [(Bool b) `(,(Instr 'movq (list (Imm (if b 1 0)) dst)))]
-		 [(Var v) `(,(Instr 'movq (list (Var v) dst)))]
-		 [(GlobalValue var) `(,(Instr 'movq (list (Global var) dst)))]
-		 [(Void) `(,(Instr 'movq (list (Imm 0) dst)))]
-		 [(FunRef f) `(,(Instr 'leaq (list expr dst)))]
-		 [(Call f args) `(,@(push-args args)
-						   ,(IndirectCallq f (length args))
-						   ,(Instr 'movq (list (Reg 'rax) dst)))]
+	  (match expr
+		[(Int n) `(,(Instr 'movq (list (Imm n) dst)))]
+		[(Bool b) `(,(Instr 'movq (list (Imm (if b 1 0)) dst)))]
+		[(Var v) `(,(Instr 'movq (list (Var v) dst)))]
+		[(GlobalValue var) `(,(Instr 'movq (list (Global var) dst)))]
+		[(Void) `(,(Instr 'movq (list (Imm 0) dst)))]
+		[(FunRef f) `(,(Instr 'leaq (list expr dst)))]
+		[(Call f args) `(,@(push-args args)
+						  ,(IndirectCallq f (length args))
+						  ,(Instr 'movq (list (Reg 'rax) dst)))]
 
-		 [(Prim 'read '()) `(,(Callq 'read_int 0) ,(Instr 'movq (list (Reg 'rax) dst)))]
-		 [(Prim 'not `(,e)) 
-		  (match e
-				 [(Bool b) `(,(Instr 'movq (list (Imm (if b 0 1)) dst)))]
-				 [(Var v)  (if (equal? e dst)
-							   `(,(Instr 'xorq (list (Imm 1) dst)))
-							   `(,(Instr 'movq (list e dst)) ,(Instr 'xorq (list (Imm 1) dst))))])]
-		 [(Prim '- `(,e)) 
-		  (if (Int? e)
-			(match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) dst))))
-			`(,(Instr 'movq (list e dst)) ,(Instr 'negq (list dst))))]
-		  
-		 [(Prim '+ `(,e1 ,e2))
-		  (cond
-			[(and (Int? e1) (Int? e2)) 
-			 (match-let ([(Int n1) e1] [(Int n2) e2]) `(,(Instr 'movq (list (Imm (+ n1 n2)) dst))))] 
-			[(or (Int? e1) (Int? e2))
-			 (match-let ([(Int n) (if (Int? e1) e1 e2)] [(Var v) (if (Int? e2) e1 e2)] [(Var var) dst]) 
-			   (if (eq? v var) 
-				 `(,(Instr 'addq (list (Imm n) dst)))
-				 `(,(Instr 'movq (list (Var v) dst)) ,(Instr 'addq (list (Imm n) dst)))))]
-			[else 
-			  (match-let ([(Var v1) e1] [(Var v2) e2] [(Var var) dst])
-				(cond
-				  [(eq? v1 var) `(,(Instr 'addq (list e2 dst)))]
-				  [(eq? v2 var) `(,(Instr 'addq (list e1 dst)))]
-				  [else `(,(Instr 'movq (list e1 dst)) ,(Instr 'addq (list e2 dst)))]))])]
-		 [(Prim 'vector-ref `(,v ,i))
-		  (list (Instr 'movq `(,v ,(Reg 'r11)))
-				(Instr 'movq `(,(Deref 'r11 (* 8 (+ (Int-value i) 1))) ,dst)))]
-		 [(Prim 'vector-set! `(,v ,i ,arg))
-		  (list (Instr 'movq `(,v ,(Reg 'r11)))
-				(Instr 'movq `(,(to-X86-val arg) ,(Deref 'r11 (* 8 (+ (Int-value i) 1)))))
-				(Instr 'movq `(,(Imm 0) ,dst)))]
-		 [(Prim (or 'eq? '< '<= '> '>=) `(,e1 ,e2))
-		  (match-let ([`(,op . ,cc) (cmpop->flag (Prim-op expr))])
-			(cond 
-			  [(and (constant? e1) (constant? e2)) `(,(Instr 'movq (list (Imm (if (op (get-const-val e1) (get-const-val e2)) 1 0)) dst)))]
-			  [else `(,(Instr 'cmpq `(,(to-X86-val e2) ,(to-X86-val e1))) 
+		[(Prim 'read '()) `(,(Callq 'read_int 0) ,(Instr 'movq (list (Reg 'rax) dst)))]
+		[(Prim 'not `(,e)) 
+		 (match e
+		   [(Bool b) `(,(Instr 'movq (list (Imm (if b 0 1)) dst)))]
+		   [(Var v)  (if (equal? e dst)
+					   `(,(Instr 'xorq (list (Imm 1) dst)))
+					   `(,(Instr 'movq (list e dst)) ,(Instr 'xorq (list (Imm 1) dst))))])]
+		[(Prim '- `(,e)) 
+		 (if (Int? e)
+		   (match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) dst))))
+		   `(,(Instr 'movq (list e dst)) ,(Instr 'negq (list dst))))]
+
+		[(Prim '+ `(,e1 ,e2))
+		 (cond
+		   [(and (Int? e1) (Int? e2)) 
+			(match-let ([(Int n1) e1] [(Int n2) e2]) `(,(Instr 'movq (list (Imm (+ n1 n2)) dst))))] 
+		   [(or (Int? e1) (Int? e2))
+			(match-let ([(Int n) (if (Int? e1) e1 e2)] [(Var v) (if (Int? e2) e1 e2)] [(Var var) dst]) 
+			  (if (eq? v var) 
+				`(,(Instr 'addq (list (Imm n) dst)))
+				`(,(Instr 'movq (list (Var v) dst)) ,(Instr 'addq (list (Imm n) dst)))))]
+		   [else 
+			 (match-let ([(Var v1) e1] [(Var v2) e2] [(Var var) dst])
+			   (cond
+				 [(eq? v1 var) `(,(Instr 'addq (list e2 dst)))]
+				 [(eq? v2 var) `(,(Instr 'addq (list e1 dst)))]
+				 [else `(,(Instr 'movq (list e1 dst)) ,(Instr 'addq (list e2 dst)))]))])]
+		[(Prim 'vector-ref `(,v ,i))
+		 (list (Instr 'movq `(,v ,(Reg 'r11)))
+			   (Instr 'movq `(,(Deref 'r11 (* 8 (+ (Int-value i) 1))) ,dst)))]
+		[(Prim 'vector-set! `(,v ,i ,arg))
+		 (list (Instr 'movq `(,v ,(Reg 'r11)))
+			   (Instr 'movq `(,(to-X86-val arg) ,(Deref 'r11 (* 8 (+ (Int-value i) 1)))))
+			   (Instr 'movq `(,(Imm 0) ,dst)))]
+		[(Prim (or 'eq? '< '<= '> '>=) `(,e1 ,e2))
+		 (match-let ([`(,op . ,cc) (cmpop->flag (Prim-op expr))])
+		   (cond 
+			 [(and (constant? e1) (constant? e2)) `(,(Instr 'movq (list (Imm (if (op (get-const-val e1) (get-const-val e2)) 1 0)) dst)))]
+			 [else `(,(Instr 'cmpq `(,(to-X86-val e2) ,(to-X86-val e1))) 
 					  ,(Instr 'set (list cc (ByteReg 'al))) 
 					  ,(Instr 'movzbq (list (ByteReg 'al) dst)))]))]
-		 [(or (Allocate bytes ts) (AllocateClosure bytes ts _))
-		  (list (Instr 'movq `(,(Global 'free_ptr) ,(Reg 'r11)))
-				(Instr 'addq `(,(Imm bytes) ,(Global 'free_ptr)))
-				(Instr 'movq `(,(Imm (get-vec-tag ts)) ,(Deref 'r11 0)))
-				(Instr 'movq `(,(Reg 'r11) ,dst)))]
-		 [(Collect bytes)
-		  (list (Instr 'movq `(,(Reg rootstack-reg) ,(Global 'rootstack_end))) ;;mannually spill rootstack-reg to memory
-				(Instr 'movq `(,(Reg rootstack-reg) ,(Reg 'rdi)))
-				(Instr 'movq `(,(Imm bytes) ,(Reg 'rsi)))
-				(Callq 'collect 2))])))
+		[(or (Allocate bytes ts) (AllocateClosure bytes ts _))
+		 (list (Instr 'movq `(,(Global 'free_ptr) ,(Reg 'r11)))
+			   (Instr 'addq `(,(Imm bytes) ,(Global 'free_ptr)))
+			   (Instr 'movq `(,(Imm (get-vec-tag ts)) ,(Deref 'r11 0)))
+			   (Instr 'movq `(,(Reg 'r11) ,dst)))]
+		[(Collect bytes)
+		 (list (Instr 'movq `(,(Reg rootstack-reg) ,(Global 'rootstack_end))) ;;mannually spill rootstack-reg to memory
+			   (Instr 'movq `(,(Reg rootstack-reg) ,(Reg 'rdi)))
+			   (Instr 'movq `(,(Imm bytes) ,(Reg 'rsi)))
+			   (Callq 'collect 2))])))
 
-  
+
   (define (trans-stmts stmts)
 	(match stmts
-		   [(Goto label) `(,(Jmp label))]
-		   [(Seq s1 tail) (append (trans-assign s1) (trans-stmts tail))]
-		   [(TailCall f args) `(,@(push-args args)
-								 ,(TailJmp f (length args)))]
-		   [(IfStmt pred thn els)
-			(match-let ([(Prim op `(,e1 ,e2))  pred])
-					   (let ([v1 (to-X86-val e1)]
-							 [v2 (to-X86-val e2)]
-							 [flag (cdr (cmpop->flag op))])
-						 `(,(Instr 'cmpq (list v2 v1)) ,(JmpIf flag (Goto-label thn)) ,(Jmp (Goto-label els)))))]
-		   [(Return expr) (match expr
-								 [(Prim '+ `(,(Int n1) ,(Int n2))) 
-								  `(,(Instr 'movq (list (Imm (+ n1 n2)) (Reg 'rax))))]
-								 [(Prim '+ `(,(Int n1) ,e2))
-								  `(,(Instr 'movq (list (Imm n1) (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax))))]
-								 [(Prim '+ `(,e1 ,(Int n2)))
-								  `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list (Imm n2) (Reg 'rax))))]
-								 [(Prim '+ `(,e1 ,e2))
-								  `(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax))))]
-								 [(Prim 'vector-ref `(,v ,i))
-								  (list (Instr 'movq `(,v ,(Reg 'r11)))
-										(Instr 'movq `(,(Deref 'r11 (* 8 (+ (Int-value i) 1))) ,(Reg 'rax))))]
-								 [(Prim '- `(,e))
-								  (if (Int? e)
-									  (match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) (Reg 'rax)))))
-									  `(,(Instr 'movq (list e (Reg 'rax))) ,(Instr 'negq (list (Reg 'rax)))))]
-								 [(Int n) `(,(Instr 'movq (list (Imm n) (Reg 'rax))))]
-								 [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
+	  [(Goto label) `(,(Jmp label))]
+	  [(Seq s1 tail) (append (trans-assign s1) (trans-stmts tail))]
+	  [(TailCall f args) `(,@(push-args args)
+							,(TailJmp f (length args)))]
+	  [(IfStmt pred thn els)
+	   (match-let ([(Prim op `(,e1 ,e2))  pred])
+		 (let ([v1 (to-X86-val e1)]
+			   [v2 (to-X86-val e2)]
+			   [flag (cdr (cmpop->flag op))])
+		   `(,(Instr 'cmpq (list v2 v1)) ,(JmpIf flag (Goto-label thn)) ,(Jmp (Goto-label els)))))]
+	  [(Return expr) (match expr
+					   [(Prim '+ `(,(Int n1) ,(Int n2))) 
+						`(,(Instr 'movq (list (Imm (+ n1 n2)) (Reg 'rax))))]
+					   [(Prim '+ `(,(Int n1) ,e2))
+						`(,(Instr 'movq (list (Imm n1) (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax))))]
+					   [(Prim '+ `(,e1 ,(Int n2)))
+						`(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list (Imm n2) (Reg 'rax))))]
+					   [(Prim '+ `(,e1 ,e2))
+						`(,(Instr 'movq (list e1 (Reg 'rax))) ,(Instr 'addq (list e2 (Reg 'rax))))]
+					   [(Prim 'vector-ref `(,v ,i))
+						(list (Instr 'movq `(,v ,(Reg 'r11)))
+							  (Instr 'movq `(,(Deref 'r11 (* 8 (+ (Int-value i) 1))) ,(Reg 'rax))))]
+					   [(Prim '- `(,e))
+						(if (Int? e)
+						  (match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) (Reg 'rax)))))
+						  `(,(Instr 'movq (list e (Reg 'rax))) ,(Instr 'negq (list (Reg 'rax)))))]
+					   [(Int n) `(,(Instr 'movq (list (Imm n) (Reg 'rax))))]
+					   [(Bool #t) `(,(Instr 'movq (list (Imm 1) (Reg 'rax))))]
+					   [(Bool #f) `(,(Instr 'movq (list (Imm 0) (Reg 'rax))))]
+					   [_ `(,(Instr 'movq (list expr (Reg 'rax))))])]))
 
   (define (num-root-spills info)
 	(count (lambda (ts) (and (pair? ts) (eq? 'Vector (car ts)))) (dict-ref info 'locals-types '())))
 
   (define (trans-def def)
 	(match-let ([(Def fn ps rt info CFG) def])
-			   (let ([info^
-					   (append 
-						 (list 
-						   (cons 'num-params (length ps))
-						   (cons 'name fn)
-						   (cons 'num-root-spills (num-root-spills info))) ; for interp-x86-2
-						 info)]
-					 [CFG^ 
-					   (for/list ([bb CFG])
-								 (let ([label (car bb)] 
-									   [stmts (cdr bb)]
-									   [start (fn-start-label fn)]
-									   [arg-pass-stmts
-										 (for/list ([p ps]
-													[r arg-registers])
-												   (Instr 'movq `(,(Reg r) ,(Var (car p)))))])
-								   (cons label 
-										 (if (eq? label start)
-											 (Block '() (append arg-pass-stmts (trans-stmts stmts)))
-											 (Block '() (trans-stmts stmts))))))])
-				 (Def fn ps rt info^ CFG^))))
+	  (let ([info^
+			  (append 
+				(list 
+				  (cons 'num-params (length ps))
+				  (cons 'name fn)
+				  (cons 'num-root-spills (num-root-spills info))) ; for interp-x86-2
+				info)]
+			[CFG^ 
+			  (for/list ([bb CFG])
+				(let ([label (car bb)] 
+					  [stmts (cdr bb)]
+					  [start (fn-start-label fn)]
+					  [arg-pass-stmts
+						(for/list ([p ps]
+								   [r arg-registers])
+						  (Instr 'movq `(,(Reg r) ,(Var (car p)))))])
+				  (cons label 
+						(if (eq? label start)
+						  (Block '() (append arg-pass-stmts (trans-stmts stmts)))
+						  (Block '() (trans-stmts stmts))))))])
+		(Def fn ps rt info^ CFG^))))
 
-  (define lenient-type-checker-for-closure 
-	(class type-check-Clambda-class
-	  (super-new)
-	  (inherit type-check-exp)
-	  (define/override (type-equal? clos-tp fun-tp)
-					   (match* (clos-tp fun-tp)
-						 [(`(Vector (,clo-ps ... -> ,clos-rt) ,fvs-tp ...) `(,ps ... -> ,rt)) #t]
-						 [(_ __) (super type-equal? clos-tp fun-tp)]))))
-
-
-  (match (send (new lenient-type-checker-for-closure) type-check-program p)
+  (match (send (new type-check-Clambda-class) type-check-program p)
 	[(CProgram info CFG) 
 	 (X86Program (cons `(num-root-spills . ,(num-root-spills info)) info)
 				 (for/list ([bb CFG]) 
-						   (cons (car bb) 
-								 (Block '() (trans-stmts (cdr bb))))))]
+				   (cons (car bb) 
+						 (Block '() (trans-stmts (cdr bb))))))]
 	[(ProgramDefs info defs) (ProgramDefs info (map trans-def defs))]))
 
 
