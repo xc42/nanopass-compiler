@@ -124,7 +124,7 @@
 	("patch instructions",patch-instructions ,interp-x86-3) 
 	("print x86" ,print-x86 #f)
 	))
-(interp-tests "r5" type-check-Rlambda r5-passes interp-Rlambda "r5_test" (tests-for "r5"))
+;(interp-tests "r5" type-check-Rlambda r5-passes interp-Rlambda "r5_test" (tests-for "r5"))
 (compiler-tests "r5" type-check-Rlambda r5-passes "r5_test" (tests-for "r5"))
 
 

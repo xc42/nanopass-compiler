@@ -948,7 +948,7 @@
 			(pqueue-decrease-key! Q (hash-ref v-h v))
 			(colorize))))))
 
-(define (allocate-register p [limit-reg 3] [rootstack-size (runtime-config::rootstack-size)] [heap-size (runtime-config::heap-size)])
+(define (allocate-register p [limit-reg 3]  )
 
   (define (do-allocate fn start-label info lab-blks)
 	(match-let*
@@ -980,10 +980,17 @@
 		   (if (or (= 0 (unbox rootst-spilled-bx)) (not (set-member? callee-save rootstack-reg)))
 			   (set)
 			   (set (Reg rootstack-reg))))]
-			   
-	   [`(,used-stack-size ,used-rootst-size) `(,(* 8 (unbox spilled-bx)) ,(* 8 (unbox rootst-spilled-bx)))]
 
-	   [align-stack-size (* 16 (quotient (+ used-stack-size 15) 16))]
+	   [tails 
+		 (let find-tails ([label start-label])
+		   (let* ([stmts (Block-instr* (dict-ref lab-blks label))]
+				  [jmps (for/list ([stmt stmts] #:when (or (JmpIf? stmt) (Jmp? stmt)))
+						  (match stmt
+							[(JmpIf _ next) next]
+							[(Jmp next) next]))])
+			 (if (null? jmps)
+			   (set label)
+			   (apply set-union (cons (set label) (map find-tails jmps))))))]
 
 	   [replace-instr 
 		 (lambda (instr)
@@ -994,64 +1001,22 @@
 					[(TailJmp f arity) (TailJmp (replace-rand f) arity)]
 					[_ instr])))]
 
-	   [conclusion-label (string->symbol (~a start-label 'conclusion))])
+	   [conclusion-label (string->symbol (~a start-label 'conclusion))]
+	   [info^ (append 
+				`((num-root-spills . ,(unbox rootst-spilled-bx))
+				  (num-stack-spills . ,(unbox spilled-bx))
+				  (used-callee-regs . ,used-callee-regs))
+				info)]
+	   [lab-blks^ (for/list ([lab-blk  lab-blks])
+					(let* ([lab (car lab-blk)]
+						   [blk (cdr lab-blk)]
+						   [stmts* (map replace-instr (Block-instr* blk))]
+						   [stmts^ (if (set-member? tails lab)
+									 (append stmts* `(,(Jmp conclusion-label)))
+									 stmts*)])
+					  (cons lab (Block (Block-info blk) stmts^))))])
 
-	(values (append 
-			  `((num-root-spills . ,(unbox rootst-spilled-bx))
-				(align-stack-size . ,align-stack-size)
-				(used-callee-regs . ,used-callee-regs))
-				info)
-			(cons
-			  (cons fn
-					(Block '() (append
-								 `(,(Instr 'pushq `(,(Reg 'rbp)))
-									,@(for/list ([reg (in-set used-callee-regs)]) (Instr 'pushq `(,reg))) ;; save callee-saved register
-									,(Instr 'movq `(,(Reg 'rsp) ,(Reg 'rbp))))
-								 (if (not (= 0 align-stack-size))
-									 `(,(Instr 'subq `(,(Imm align-stack-size) ,(Reg 'rsp)))) ;;reserve stack space
-									 '())
-								 (if (eq? fn 'main) ;;GC init
-									 `(,(Instr 'movq `(,(Imm rootstack-size)  ,(Reg 'rdi)))
-										,(Instr 'movq `(,(Imm heap-size) ,(Reg 'rsi)))
-										,(Callq 'initialize 2))
-									 '())
-								 (if (not (= 0 (unbox rootst-spilled-bx)))
-									 `(,(Instr 'movq `(,(Global  'rootstack_end) ,(Reg rootstack-reg)))
-										,@(if (eq? fn 'main)
-											  `(,(Instr 'movq `(,(Imm 0) ,(Deref rootstack-reg 0)))) ;; init rootstack to empty(see runtime.c), only in main 
-											  '())
-										,(Instr 'addq `(,(Imm used-rootst-size) ,(Reg rootstack-reg))))
-									 '())
-									`(,(Jmp start-label)))))
-			  (cons 
-				(cons conclusion-label
-					  (Block '() (append
-								   `(,@(if (not (= 0 (unbox rootst-spilled-bx)))
-										   `(,(Instr 'subq `(,(Imm used-rootst-size) ,(Reg rootstack-reg)))
-											  ,(Instr 'movq `(,(Reg rootstack-reg) ,(Global 'rootstack_end)))) 
-										   '())
-									  ,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
-								   `(,@(for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
-									 ,(Instr 'popq `(,(Reg 'rbp)))
-									  ,(Retq)))))
-				(map 
-				  (let ([tails 
-						  (let find-tails ([label start-label])
-							(let* ([stmts (Block-instr* (dict-ref lab-blks label))]
-								   [jmps (for/list ([stmt stmts] #:when (or (JmpIf? stmt) (Jmp? stmt)))
-												   (match stmt
-														  [(JmpIf _ next) next]
-														  [(Jmp next) next]))])
-							  (if (null? jmps)
-								  (set label)
-								  (apply set-union (cons (set label) (map find-tails jmps))))))])
-
-					(lambda (lab-blk)
-					  (match-let ([(cons lab* (Block binfo* stmts*)) lab-blk])
-								 (if (set-member? tails lab*)
-									 (cons lab* (Block binfo* (append (map replace-instr stmts*) `(,(Jmp conclusion-label)))))
-									 (cons lab* (Block binfo* (map replace-instr stmts*)))))))
-				  lab-blks))))))
+	(values info^ lab-blks^)))
 
   (define (allocate-for-def def)
 	(match-let ([(Def fn ps rt info CFG) def])
@@ -1111,52 +1076,83 @@
 
 ;; print-x86 : x86 -> string 
 (define (print-x86 p)
-  (define (instr-printer info)
-	(let ([num-root-spills (dict-ref info 'num-root-spills 0)]
-		  [align-stack-size (dict-ref info 'align-stack-size 0)]
-		  [used-callee-regs (dict-ref info 'used-callee-regs 0)]
-		  [print-item
-			(lambda (item)
-			  (match item
-					 [(Reg r) (~a "%" r)]
-					 [(ByteReg br) (~a item)]
-					 [(Imm n) (~a "$" n)]
-					 [(Global g) (~a  g "(%rip)")]
-					 [(Deref r o) (format "~a(%~a)" o r)]
-					 [(FunRef label) (~a label "(%rip)")]))])
-	  (letrec 
-		([print-instr
-		   (lambda (instr)
-			 (match instr
-					[(Instr 'set `(,cc ,arg)) (format "~a~a ~a" 'set cc (print-item arg))]
-					[(Instr op args) (format "~a ~a" op (string-join (map print-item args) ","))]
-					[(JmpIf f label) (format "~a~a ~a" 'j f label)]
-					[(Jmp label) (~a "jmp " label)]
-					[(TailJmp f arity) 
-					 (let ([clean-up 
-							 `(,(Instr 'subq `(,(Imm num-root-spills) ,(Reg rootstack-reg)))
-								,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp)))
-								,@(for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
-								,(Instr 'popq `(,(Reg 'rbp))))])
-					   (string-join (append (map print-instr clean-up) `(,(~a "jmp *%" (Reg-name f)))) "\n\t"))]
-					[(Retq) "retq"]
-					[(IndirectCallq f _) (~a "callq *%" (Reg-name f))]
-					[(Callq func _) (~a "callq " func)]))])
-		print-instr)))
 
-  (define (print-CFG entry info CFG)
+  (define (print-CFG fn info CFG)
+	(let* ([num-root-spills (dict-ref info 'num-root-spills 0)]
+		   [num-stack-spills (dict-ref info 'num-stack-spills 0)]
+		   [used-callee-regs (dict-ref info 'used-callee-regs 0)]
+		   [align-stack-size (* 16 (quotient (+ (* num-stack-spills 8) 15) 16))]
+		   [used-rootst-size (* 8 num-root-spills)]
+		   [rootstack-size (runtime-config::rootstack-size)]
+		   [heap-size (runtime-config::heap-size)]
+		   [clean-up 
+			 (append
+			   `(,@(if (not (= 0 num-root-spills))
+					 `(,(Instr 'subq `(,(Imm used-rootst-size) ,(Reg rootstack-reg)))
+						,(Instr 'movq `(,(Reg rootstack-reg) ,(Global 'rootstack_end)))) 
+					 '())
+				  ,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
+			   `(,@(for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
+				  ,(Instr 'popq `(,(Reg 'rbp)))))]
+		   [prelude 
+			 (Block '() 
+					(append
+					  `(,(Instr 'pushq `(,(Reg 'rbp)))
+						 ,@(for/list ([reg (in-set used-callee-regs)]) (Instr 'pushq `(,reg))) ;; save callee-saved register
+						 ,(Instr 'movq `(,(Reg 'rsp) ,(Reg 'rbp))))
+					  (if (not (= 0 align-stack-size))
+						`(,(Instr 'subq `(,(Imm align-stack-size) ,(Reg 'rsp)))) ;;reserve stack space
+						'())
+					  (if (eq? fn 'main) ;;GC init
+						`(,(Instr 'movq `(,(Imm rootstack-size)  ,(Reg 'rdi)))
+						   ,(Instr 'movq `(,(Imm heap-size) ,(Reg 'rsi)))
+						   ,(Callq 'initialize 2))
+						'())
+					  (if (not (= 0 num-root-spills))
+						`(,(Instr 'movq `(,(Global  'rootstack_end) ,(Reg rootstack-reg)))
+						   ,@(if (eq? fn 'main)
+							   `(,(Instr 'movq `(,(Imm 0) ,(Deref rootstack-reg 0)))) ;; init rootstack to empty(see runtime.c), only in main 
+							   '())
+						   ,(Instr 'addq `(,(Imm used-rootst-size) ,(Reg rootstack-reg))))
+						'())
+					  `(,(Jmp (fn-start-label fn)))))]
+		   [conclusion-label (string->symbol (~a (fn-start-label fn) 'conclusion))]
+		   [conclude (Block '() (append clean-up `(,(Retq))))]
+		   [CFG^ (append `((,fn . ,prelude)
+						   (,conclusion-label . ,conclude))
+						 CFG)]
+		   [print-item
+			 (lambda (item)
+			   (match item
+				 [(Reg r) (~a "%" r)]
+				 [(ByteReg br) (~a item)]
+				 [(Imm n) (~a "$" n)]
+				 [(Global g) (~a  g "(%rip)")]
+				 [(Deref r o) (format "~a(%~a)" o r)]
+				 [(FunRef label) (~a label "(%rip)")]))])
+
+	  (letrec ([instr-printer (lambda (instr)
+								(match instr
+								  [(Instr 'set `(,cc ,arg)) (format "~a~a ~a" 'set cc (print-item arg))]
+								  [(Instr op args) (format "~a ~a" op (string-join (map print-item args) ","))]
+								  [(JmpIf f label) (format "~a~a ~a" 'j f label)]
+								  [(Jmp label) (~a "jmp " label)]
+								  [(TailJmp f arity) 
+								   (string-join (append (map instr-printer clean-up) `(,(~a "jmp *%" (Reg-name f)))) "\n\t")]
+								  [(Retq) "retq"]
+								  [(IndirectCallq f _) (~a "callq *%" (Reg-name f))]
+								  [(Callq func _) (~a "callq " func)]))])
+
 	;(string-append (format "\t.global ~a\n\t.align ~a\n" 
 	(string-append (format "\t.global ~a\n" 
-						   entry)
+						   fn)
 						   ;(dict-ref info 'align-stack-size))
 				   (string-join 
-					 (map
-					   (lambda (lab-blk)
+					   (for/list ([lab-blk CFG^])
 						 (let ([label (car lab-blk)]
 							   [stmts (Block-instr* (cdr lab-blk))])
-						   (format "~s:\n\t~a" label (string-join (map (instr-printer info) stmts) "\n\t"))))
-					   CFG)
-					 "\n\n")))
+						   (format "~s:\n\t~a" label (string-join (map instr-printer stmts) "\n\t"))))
+					 "\n\n")))))
 
   (match p
 		 [(X86Program info CFG) (print-CFG 'main info CFG)]
