@@ -362,39 +362,30 @@
 			(Let vs (car es) (nested-let-expr vs (cdr es) body)))))
 
   (define (do-allocate es bytes alloc-expr)
-	(let* ([vs (map (lambda (x) (gensym 'vec-init)) es)]
-		   [len (length vs)]
-		   [assign-body 
-			 (let ([var-vec (gensym 'alloc)])
-			   (Let  
-				 var-vec alloc-expr
-				 (nested-let-expr 
-				   '_ 
-				   (let all-assign ([idx 0] [vs* vs])
-					 (if (null? vs*)
-					   '()
-					   (cons (Prim 'vector-set! `(,(Var var-vec) ,(Int idx) ,(Var (car vs*))))
-							 (all-assign (+ idx 1) (cdr vs*))))) 
-				   (Var var-vec))))]
-		   [alloc-body
-			 (Let '_ 
-				  (If (Prim '< 
-							(list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Int bytes)))
-								  (GlobalValue 'fromspace_end)))
-					  (Void)
-					  (Collect bytes))
-				  assign-body)])
-	  (nested-let-expr vs (map expose-allocation-expr es) alloc-body)))
+	(let* ([var-vec (gensym 'alloc)]
+		   [es^ (let all-assign ([idx 0] [es* es])
+				  (if (null? es*)
+					'()
+					(cons (Prim 'vector-set! `(,(Var var-vec) ,(Int idx) ,(car es*)))
+						  (all-assign (+ idx 1) (cdr es*)))))]
+		   [assign-body (Let var-vec alloc-expr (nested-let-expr '_ es^ (Var var-vec)))])
+	  (Let '_ 
+		   (If (Prim '< 
+					 (list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Int bytes)))
+						   (GlobalValue 'fromspace_end)))
+			   (Void)
+			   (Collect bytes))
+		   assign-body)))
 
 
   (define (expose-allocation-expr expr)
 	(match expr
 	  [(HasType (Prim 'vector es) ts) 
 	   (let ([bytes (calc-bytes-needed ts)])
-		 (do-allocate es bytes (Allocate bytes ts)))]
+		 (do-allocate (map expose-allocation-expr es) bytes (Allocate bytes ts)))]
 	  [(HasType (Closure arity es) ts)
 	   (let ([bytes (calc-bytes-needed ts)])
-		 (do-allocate es bytes (AllocateClosure bytes ts arity)))]
+		 (do-allocate (map expose-allocation-expr es) bytes (AllocateClosure bytes ts arity)))]
 	  [else (map-over-expr expose-allocation-expr expr)]))
 
   (define (unwarp-HasType expr)
@@ -521,7 +512,10 @@
 	(let ([mask (let pointer-mask ([ts* (cdr vec-ts)])
 				  (if (null? ts*)
 					0
-					(bitwise-ior (arithmetic-shift (pointer-mask (cdr ts*)) 1) (if (pair? (car vec-ts)) 1 0))))]
+					(bitwise-ior (arithmetic-shift (pointer-mask (cdr ts*)) 1) 
+								 (match (car ts*)
+								   [`(Vector ,t ...) 1]
+								   [else 0]))))]
 		  [len (length (cdr vec-ts))]
 		  [<< arithmetic-shift]
 		  [|| bitwise-ior])
@@ -600,8 +594,7 @@
 			   (Instr 'movq `(,(Imm (get-vec-tag ts)) ,(Deref 'r11 0)))
 			   (Instr 'movq `(,(Reg 'r11) ,dst)))]
 		[(Collect bytes)
-		 (list (Instr 'movq `(,(Reg rootstack-reg) ,(Global 'rootstack_end))) ;;mannually spill rootstack-reg to memory
-			   (Instr 'movq `(,(Reg rootstack-reg) ,(Reg 'rdi)))
+		 (list (Instr 'movq `(,(Reg rootstack-reg) ,(Reg 'rdi)))
 			   (Instr 'movq `(,(Imm bytes) ,(Reg 'rsi)))
 			   (Callq 'collect 2))])))
 
@@ -981,17 +974,6 @@
 			   (set)
 			   (set (Reg rootstack-reg))))]
 
-	   [tails 
-		 (let find-tails ([label start-label])
-		   (let* ([stmts (Block-instr* (dict-ref lab-blks label))]
-				  [jmps (for/list ([stmt stmts] #:when (or (JmpIf? stmt) (Jmp? stmt)))
-						  (match stmt
-							[(JmpIf _ next) next]
-							[(Jmp next) next]))])
-			 (if (null? jmps)
-			   (set label)
-			   (apply set-union (cons (set label) (map find-tails jmps))))))]
-
 	   [replace-instr 
 		 (lambda (instr)
 		   (let ([replace-rand (lambda (rand) (dict-ref var-map rand rand))])
@@ -1011,7 +993,12 @@
 					(let* ([lab (car lab-blk)]
 						   [blk (cdr lab-blk)]
 						   [stmts* (map replace-instr (Block-instr* blk))]
-						   [stmts^ (if (set-member? tails lab)
+						   [is-tail (let find ([instrs stmts*])
+											   (cond
+												 [(null? instrs) #t]
+												 [(or (TailJmp? (car instrs)) (Jmp? (car instrs))) #f]
+												 [else (find (cdr instrs))]))]
+						   [stmts^ (if is-tail
 									 (append stmts* `(,(Jmp conclusion-label)))
 									 stmts*)])
 					  (cons lab (Block (Block-info blk) stmts^))))])
@@ -1085,15 +1072,6 @@
 		   [used-rootst-size (* 8 num-root-spills)]
 		   [rootstack-size (runtime-config::rootstack-size)]
 		   [heap-size (runtime-config::heap-size)]
-		   [clean-up 
-			 (append
-			   `(,@(if (not (= 0 num-root-spills))
-					 `(,(Instr 'subq `(,(Imm used-rootst-size) ,(Reg rootstack-reg)))
-						,(Instr 'movq `(,(Reg rootstack-reg) ,(Global 'rootstack_end)))) 
-					 '())
-				  ,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
-			   `(,@(for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
-				  ,(Instr 'popq `(,(Reg 'rbp)))))]
 		   [prelude 
 			 (Block '() 
 					(append
@@ -1109,14 +1087,22 @@
 						   ,(Callq 'initialize 2))
 						'())
 					  (if (not (= 0 num-root-spills))
-						`(,(Instr 'movq `(,(Global  'rootstack_end) ,(Reg rootstack-reg)))
+						`(,(Instr 'addq `(,(Imm used-rootst-size) ,(Global  'rootstack_end)))
+						  ,(Instr 'movq `(,(Global 'rootstack_end) ,(Reg rootstack-reg)))
 						   ,@(if (eq? fn 'main)
 							   `(,(Instr 'movq `(,(Imm 0) ,(Deref rootstack-reg 0)))) ;; init rootstack to empty(see runtime.c), only in main 
-							   '())
-						   ,(Instr 'addq `(,(Imm used-rootst-size) ,(Reg rootstack-reg))))
+							   '()))
 						'())
 					  `(,(Jmp (fn-start-label fn)))))]
 		   [conclusion-label (string->symbol (~a (fn-start-label fn) 'conclusion))]
+		   [clean-up 
+			 (append
+			   `(,@(if (not (= 0 num-root-spills))
+					 `(,(Instr 'subq `(,(Imm used-rootst-size) ,(Global 'rootstack_end))))
+					 '())
+				  ,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
+			   `(,@(for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
+				  ,(Instr 'popq `(,(Reg 'rbp)))))]
 		   [conclude (Block '() (append clean-up `(,(Retq))))]
 		   [CFG^ (append `((,fn . ,prelude)
 						   (,conclusion-label . ,conclude))

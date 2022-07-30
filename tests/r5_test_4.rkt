@@ -4,9 +4,10 @@
 	(repeat (lambda: ([x : Integer]) : Integer (f (f x))) (- n 1))))
 
 
-(define (exp [n : Integer] [m : Integer]) : Integer
+(define (fun [n : Integer] [m : Integer]) : Integer
   (let ([addN (lambda: ([x : Integer]) : Integer (+ x n))])
-	((repeat addN m) 1)))
+	((repeat addN m) 0)))
 
-
-(exp 2 4)
+(fun 5 4)
+;(fun 5 3)
+;(repeat addN 3) := (Vector 'repeat_lambda (Vector 'repeat_lambda (Vector addN n)))

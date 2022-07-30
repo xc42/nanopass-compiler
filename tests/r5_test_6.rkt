@@ -50,11 +50,11 @@
   (lambda: ([v : (Vector Integer Integer Integer Integer Integer Integer Integer)]) : (Vector Integer Integer Integer Integer Integer Integer Integer)
 	(f (g v))))
 
-
-(let ([v (vector 11 22 33 44 55 66 77)])
+(let ([v1 (vector 11 22 33 44 55 66 77)])
+  (let ([v2 (vector 33 44 55 66 77 11 22)])
   (let ([shiftLeft3 (repeat shiftLeft 3)])
 	(let ([shiftRight2 (repeat shiftRight 2)])
-	  (if (checkEq ((compose shiftLeft (compose shiftLeft3 shiftLeft3)) v)
-				   ((compose (repeat shiftRight 2) shiftRight2) v))
+	  (if (checkEq ((compose shiftRight2 (compose shiftLeft3 shiftLeft3)) v1)
+				   ((compose (repeat shiftLeft3 2) (repeat shiftRight2 2)) v2))
 		88
-		99))))
+		99)))))
