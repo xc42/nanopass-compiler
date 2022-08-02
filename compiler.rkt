@@ -9,50 +9,6 @@
 (require racket/promise)
 (provide (all-defined-out))
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Rint examples
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-;; The following compiler pass is just a silly one that doesn't change
-;; anything important, but is nevertheless an example of a pass. It
-;; flips the arguments of +. -Jeremy
-(define (flip-exp e)
-  (match e
-    [(Var x) e]
-    [(Prim 'read '()) (Prim 'read '())]
-    [(Prim '- (list e1)) (Prim '- (list (flip-exp e1)))]
-    [(Prim '+ (list e1 e2)) (Prim '+ (list (flip-exp e2) (flip-exp e1)))]))
-
-(define (flip-Rint e)
-  (match e
-    [(Program info e) (Program info (flip-exp e))]))
-
-
-;; Next we have the partial evaluation pass described in the book.
-(define (pe-neg r)
-  (match r
-    [(Int n) (Int (fx- 0 n))]
-    [else (Prim '- (list r))]))
-
-(define (pe-add r1 r2)
-  (match* (r1 r2)
-    [((Int n1) (Int n2)) (Int (fx+ n1 n2))]
-    [(_ _) (Prim '+ (list r1 r2))]))
-
-(define (pe-exp e)
-  (match e
-    [(Int n) (Int n)]
-    [(Prim 'read '()) (Prim 'read '())]
-    [(Prim '- (list e1)) (pe-neg (pe-exp e1))]
-    [(Prim '+ (list e1 e2)) (pe-add (pe-exp e1) (pe-exp e2))]))
-
-(define (pe-Rint p)
-  (match p
-    [(Program info e) (Program info (pe-exp e))]))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; HW1 Passes
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define-syntax-rule (map-program-def f p)
   (match-let ([(ProgramDefs info defs) p])
@@ -75,82 +31,174 @@
 		   [(Let v e body) (Let v (f e) (f body))]
 		   [(Lambda ps rt body) (Lambda ps rt (f body))]
 		   [(HasType e t) (HasType (f e) t)]
+		   [(SetBang v e) (SetBang v (f e))]
+		   [(Begin es e) (Begin (map f es) (f e))]
+		   [(WhileLoop cnd body) (WhileLoop (f cnd) (f body))]
 		   [else expr]))
 
 ;; R5 -> R5
 (define (shrink p)
-  (letrec
-	([shrink-exp
-	   (lambda (e)
-		 (match e
-				[(Prim op `(,e1 ,es ...))
-				 (let* ([e1 (shrink-exp e1)]
-						[es (map shrink-exp es)]
-						[new-es (cons e1 es)]
-						[T (Bool #t)]
-						[F (Bool #f)])
-				   (match op
-						  ['- (if (eq? es '()) 
-								  (Prim op `(,e1))
-								  (Prim '+ `(,e1 ,(Prim '- es))))]
-						  ['and (If e1 (If (car es) T F) F)]
-						  ['or (If e1 T (If (car es) T F))]
-						  ;['<= (If (Prim '< new-es) T (If (Prim 'eq? new-es) T F))]
-						  ;['>= (Prim 'not `(,(Prim '< new-es)))]
-						  ;['>  (If (Prim 'not `(,(Prim '< new-es))) (If (Prim 'eq? new-es) F T) F)]
-						  [other (Prim op new-es)]))]
-				[(Let v e body) (Let v (shrink-exp e) (shrink-exp body))]
-				[(If cnd thn els) (If (shrink-exp cnd) (shrink-exp thn) (shrink-exp els))]
-				[(HasType e t) (HasType (shrink-exp e) t)]
-				[(Apply f args) (Apply (shrink-exp f) (map shrink-exp args))]
-				[(Lambda ps rt body) (Lambda ps rt (shrink-exp body))]
-				[_ e]))])
-	(match p
-		   [(Program info body) (Program info (shrink-exp body))]
-		   [(ProgramDefsExp info defs expr) 
-			(ProgramDefs info (append
-								(for/list ([def (in-list defs)])
-											(match-let ([(Def fn ps rt info body) def])
-													   (Def fn ps rt info (shrink-exp body))))
-								 `(,(Def 'main '() 'Integer '() (shrink-exp expr)))))])))
+  (define (shrink-exp e)
+	(match e
+	  [(Prim op `(,e1 ,es ...))
+	   (let* ([e1 (shrink-exp e1)]
+			  [es (map shrink-exp es)]
+			  [new-es (cons e1 es)]
+			  [T (Bool #t)]
+			  [F (Bool #f)])
+		 (match op
+		   ['- (if (eq? es '()) 
+				 (Prim op `(,e1))
+				 (Prim '+ `(,e1 ,(Prim '- es))))]
+		   ['and (If e1 (If (car es) T F) F)]
+		   ['or (If e1 T (If (car es) T F))]
+		   ;['<= (If (Prim '< new-es) T (If (Prim 'eq? new-es) T F))]
+		   ;['>= (Prim 'not `(,(Prim '< new-es)))]
+		   ;['>  (If (Prim 'not `(,(Prim '< new-es))) (If (Prim 'eq? new-es) F T) F)]
+		   [other (Prim op new-es)]))]
+	  [else (map-over-expr shrink-exp e)]))
+  (match p
+	[(Program info body)
+	 (ProgramDefs info `(,(Def 'main '() 'Integer '() (shrink-exp body))))]
+	[(ProgramDefsExp info defs expr) 
+	 (ProgramDefs info (append
+						 (for/list ([def (in-list defs)])
+						   (match-let ([(Def fn ps rt info body) def])
+							 (Def fn ps rt info (shrink-exp body))))
+						 `(,(Def 'main '() 'Integer '() (shrink-exp expr)))))]))
 
 
 ;; uniquify : R5 -> R5
 (define (uniquify p)
   (define (uniquify-exp env)
-	(lambda (e)
+	(lambda (expr)
 	  (let ([uniq (uniquify-exp env)])
-		(match e
-			   [(Var x) (Var (lookup x env))]
-			   [(Int n) e]
-			   [(Bool b) e]
-			   [(HasType e t) (HasType (uniq e) t)]
-			   [(Let x e body)
-				(let ([x* (gensym x)])
-				  (Let x* (uniq e) ((uniquify-exp (extend-env env x x*)) body)))]
-			   [(If e1 e2 e3) (If (uniq e1) (uniq e2) (uniq e3))]
-			   [(Prim op es) (Prim op (map uniq es))]
-			   [(Apply f args) (Apply (uniq f) (map uniq args))]
-			   [(Lambda ps rt body) 
-				(let ([env-ex (for/fold ([env^ env])
-										([x ps])
-										(extend-env env^ (car x) (car x)))])
-				(Lambda ps rt ((uniquify-exp env-ex) body)))]))))
+		(match expr
+		  [(Var x) (Var (lookup x env))]
+		  [(SetBang x e) (SetBang (lookup x env) (uniq e))]
+		  [(Let x e body)
+		   (let ([x* (gensym x)])
+			 (Let x* (uniq e) ((uniquify-exp (extend-env env x x*)) body)))]
+		  [(Lambda `([,xs : ,ts] ...) rt body) 
+		   (let* ([xs^ (map gensym xs)]
+				  [ps^ (map (lambda (x t) `(,x : ,t)) xs^ ts)]
+				  [env-ex (for/fold ([env^ env])
+							([x xs] 
+							 [x^ xs^])
+							(extend-env env^ x x^))])
+			 (Lambda ps^ rt ((uniquify-exp env-ex) body)))]
+		  [else (map-over-expr uniq expr)]))))
   (match p
-		 [(Program info body) (Program info ((uniquify-exp '()) body))]
-		 [(ProgramDefs info defs)
-		  (let ([global-env (foldl (lambda (def env) (extend-env env (Def-name def) (Def-name def))) '() defs)])
-			(ProgramDefs info 
-						 (for/list ([def (in-list defs)])
-								   (match-let ([(Def fn ps rt info body) def])
-											  (let ([init-env 
-													  (foldl 
-														(lambda (param env) 
-														  (let ([var (if (pair? param) (car param) param)])
-															(extend-env env var var))) 
-														global-env 
-														ps)])
-												(Def fn ps rt info ((uniquify-exp init-env) body)))))))])) 
+	[(Program info body) (Program info ((uniquify-exp '()) body))]
+	[(ProgramDefs info defs)
+	 (let ([global-env (foldl (lambda (def env) (extend-env env (Def-name def) (Def-name def))) '() defs)])
+	   (ProgramDefs info 
+					(for/list ([def (in-list defs)])
+					  (match-let ([(Def fn ps rt info body) def])
+						(let ([init-env 
+								(foldl 
+								  (lambda (param env) 
+									(let ([var (if (pair? param) (car param) param)])
+									  (extend-env env var var))) 
+								  global-env 
+								  ps)])
+						  (Def fn ps rt info ((uniquify-exp init-env) body)))))))])) 
+
+
+(define (free-variable expr)
+  (match expr
+	[(? Var?) (set expr)]
+	[(? HasType?) (if (Var? (HasType-expr expr))
+					(set expr) ;;to keep var's type info, used in closure conversion pass
+					(free-variable (HasType-expr expr)))]
+	[(Let x e body) (set-union (free-variable e) (set-remove (free-variable body) (Var x)))]
+	[(Lambda ps rty body) (set-subtract (free-variable body) 
+										(for/set ([p ps]) (HasType (Var (car p)) (last p))))]
+	[(If e1 e2 e3) (apply set-union (map free-variable `(,e1 ,e3 ,e3)))]
+	[(Apply f args) (apply set-union (map free-variable (cons f args)))]
+	[(Prim op es) (apply set-union (map free-variable es))]
+	[(SetBang v e) (set-add (free-variable e) (Var v))]
+	[(Begin es body) (apply set-union (cons (free-variable body) (map free-variable es)))]
+	[(WhileLoop cnd body) (set-union (free-variable cnd) (free-variable body))]
+	[else (set)]))
+
+
+(define (convert-assignment p)
+
+  (define (gather-assigned-free expr)
+	(match expr
+	  [(SetBang v e)
+	   (let-values ([(e^ A F) (gather-assigned-free e)]) ;; A: assigned F:free-variable
+		 (values (SetBang v e^) (set-add A v) F))]
+	  [(Lambda ps rt body)
+	   (let-values ([(body^ A F) (gather-assigned-free body)]
+					[(xs) (for/set ([xt ps]) (car xt))]
+					[(fvs) (for/set ([fv (free-variable body)]) (Var-name fv))])
+		 (values (Lambda ps rt body^) (set-subtract A xs) (set-subtract (set-union F fvs) xs)))]
+	  [(Let v e body) 
+	   (let-values ([(e^ Ae Fe)  (gather-assigned-free e)]
+					[(body^ Ab Fb) (gather-assigned-free body)])
+		 (let ([v^ (if (and (set-member? Ab v) (set-member? Fb v))
+					 (AssignedFree v)
+					 v)])
+		   (values (Let v^ e^ body^) (set-union Ae Ab) (set-union Fe Fb))))]
+	  [(Prim op es) (gather-es es (lambda (es^) (Prim op es^)))]
+	  [(If pred thn els) (gather-es `(,pred ,thn ,els) (lambda (es^) (apply If es^)))]
+	  [(Apply f args) (gather-es (cons f args) (lambda (es^) (Apply (car es^) (cdr es^))))]
+	  [(Begin es* body) (gather-es (cons body es*) (lambda (es^) (Begin (cdr es^) (car es^))))]
+	  [(WhileLoop cnd body) (gather-es `(,cnd ,body) (lambda (es^) (apply WhileLoop es^)))]
+	  [_ (values expr (set) (set))]))
+
+  (define (gather-es es ctor)
+	(for/foldr ([acc-e '()] 
+				[A (set)] 
+				[F (set)]
+				#:result (values (ctor acc-e) A F))
+	  ([e es])
+	  (let-values ([(e^ a f) (gather-assigned-free e)])
+		(values (cons e^ acc-e) (set-union a A) (set-union f F)))))
+	  
+
+  (define (convert-def def)
+	(match-let ([(Def name ps rt info body) def])
+	  (let-values ([(body^ A F) (gather-assigned-free body)])
+
+		(define (assign&free v)
+		  (and (set-member? A v) (set-member? F v)))
+
+		(define (convert-expr expr)
+		  (match expr
+			[(Var x) 
+			 (if (assign&free x) 
+			   (Prim 'vector-ref `(,(Var x) ,(Int 0))) 
+			   expr)]
+			[(Let (AssignedFree x) e body) (Let x (Prim 'vector `(,(convert-expr e))) (convert-expr body))]
+			[(SetBang v e) 
+			 (if (assign&free v)
+			   (Prim 'vector-set! `(,(Var v) ,(Int 0) ,(convert-expr e)))
+			   (SetBang v (convert-expr e)))]
+			[(Lambda ps rt body) 
+			 (let-values ([(ps^ body^) (convert-fun ps (convert-expr body))])
+			   (Lambda ps^ rt body^))]
+			[else (map-over-expr convert-expr expr)]))
+
+		(define (convert-fun ps body)
+		  (for/foldr ([xs^ '()]
+					  [body^ body])
+					 ([xt ps])
+					 (let ([x (car xt)])
+					   (cond
+						 [(assign&free x)
+						  (let ([x^ (gensym x)])
+							(values (cons (cons x^ (cdr xt)) xs^)
+									(Let x (Prim 'vector `(,(Var x^))) body^)))]
+						 [else (values (cons xt xs^) body^)]))))
+
+		(let-values ([(ps^ body^^) (convert-fun ps (convert-expr body^))])
+		  (Def name ps^ rt info body^^)))))
+
+  (map-program-def convert-def p))
+
 
 
 ;; R4 -> R4
@@ -161,13 +209,7 @@
 			   (lambda (expr)
 				 (match expr
 						[(Var v) (let ([f* (assv v fs)]) (if  f* (FunRefArity v (cdr f*)) expr))]
-						[(HasType e t) (HasType (reveal-functions* e) t)]
-						[(Let x e body) (Let x (reveal-functions* e) (reveal-functions* body))]
-						[(If e1 e2 e3) (If (reveal-functions* e1) (reveal-functions* e2) (reveal-functions* e3))]
-						[(Prim op es) (Prim op (map reveal-functions* es))]
-						[(Apply f args) (Apply (reveal-functions* f) (map reveal-functions* args))]
-						[(Lambda ps rt body) (Lambda ps rt (reveal-functions* body))]
-						[_ expr]))])
+						[else (map-over-expr reveal-functions* expr)]))])
 	  (match p
 			 [(? Program?) p]
 			 [(? ProgramDefs?) (map-program-def-body reveal-functions* p)]))))
@@ -192,18 +234,6 @@
 ;			(values (HasType e^ ty) e* rt)]
 ;		  [else (error 'type-check "expected a function, not ~a" ty)]))))
 
-  (define (free-variable expr)
-	(match expr
-	  [(? HasType?) (if (Var? (HasType-expr expr))
-					  (set expr)
-					  (free-variable (HasType-expr expr)))]
-	  [(Let x e body) (set-union (free-variable e) (set-remove (free-variable body) x))]
-	  [(Lambda ps rty body) (set-subtract (free-variable body) 
-										  (for/set ([p ps]) (HasType (Var (car p)) (last p))))]
-	  [(If e1 e2 e3) (apply set-union (map free-variable `(,e1 ,e3 ,e3)))]
-	  [(Apply f args) (apply set-union (map free-variable (cons f args)))]
-	  [(Prim op es) (apply set-union (map free-variable es))]
-	  [else (set)]))
 
   (define (convert-func-type rt)
 	(match rt

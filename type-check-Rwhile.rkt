@@ -1,8 +1,8 @@
 #lang racket
 (require graph)
-(require "multigraph.rkt")
+;(require "multigraph.rkt")
 (require "utilities.rkt")
-(require (only-in "any.rkt" compile-Rany))
+;(require (only-in "any.rkt" compile-Rany))
 (require (only-in "type-check-Rlambda.rkt" typed-vars))
 (require "type-check-Rany.rkt")
 (require "type-check-Cany.rkt")
