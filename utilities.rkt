@@ -12,7 +12,6 @@
 
 #lang racket
 (require racket/struct)
-(require graph)
 
 ;; Version 0.2
 ;; ---------------------
@@ -64,16 +63,15 @@ Changelog:
          fun-call? indirect-call?
          read-fixnum read-program 
 	 compile compile-file check-passes-suite interp-tests compiler-tests
-         ;compiler-tests-gui 
-		 compiler-tests-suite
-         print-dot print-graph
+         compiler-tests-gui compiler-tests-suite
          use-minimal-set-of-registers!
 	 general-registers num-registers-for-alloc registers-for-alloc
          caller-save callee-save caller-save-for-alloc callee-save-for-alloc
 	 arg-registers rootstack-reg register->color color->register
          registers align byte-reg->full-reg print-by-type strip-has-type
-         make-lets dict-set-all dict-remove-all goto-label get-CFG 
+         make-lets dict-set-all dict-remove-all goto-label get-basic-blocks 
          symbol-append any-tag parse-program vector->set atm? fst
+         print-x86 print-x86-class
          
          (contract-out [struct Prim ((op symbol?) (arg* exp-list?))])
          (contract-out [struct Var ((name symbol?))])
@@ -86,17 +84,18 @@ Changelog:
          (struct-out X86Program)
          (contract-out [struct WhileLoop ((cnd exp?) (body exp?))])
          (contract-out [struct SetBang ((var symbol?) (rhs exp?))])
+         (contract-out [struct GetBang ((var symbol?))])
          (contract-out [struct Begin ((es exp-list?) (body exp?))])
          (contract-out [struct Bool ((value boolean?))])
          (contract-out [struct If ((cnd exp?) (thn exp?) (els exp?))])
          (contract-out [struct HasType ((expr exp?) (type type?))])
          (struct-out Void)
+         (contract-out [struct StructDef ((name symbol?) (field* param-list?))])
          (contract-out [struct Apply ((fun exp?) (arg* exp-list?))])
          (contract-out [struct Def ((name symbol?) (param* param-list?) (rty type?) (info any?)
-                                    (body any?))])
+                                                   (body any?))])
          (contract-out [struct Lambda ((param* param-list?) (rty type?) (body exp?))])
-         (contract-out [struct FunRef ((name symbol?))])
-         (contract-out [struct FunRefArity ((name symbol?) (arity fixnum?))])
+         (contract-out [struct FunRef ((name symbol?) (arity fixnum?))])
          (struct-out Inject)
          (struct-out Project)
          (struct-out ValueOf)
@@ -123,18 +122,19 @@ Changelog:
          (struct-out CollectionNeeded?)
          (struct-out GlobalValue)
          (struct-out Allocate)
+         (struct-out AllocateHom)
          (struct-out AllocateClosure)
          (struct-out AllocateProxy)
          (contract-out [struct Call ((fun atm?) (arg* atm-list?))])
          (contract-out [struct TailCall ((fun atm?) (arg* atm-list?))])
-         (struct-out CFG)
          
-         (contract-out [struct Imm ((value fixnum?))])
+         (contract-out [struct Imm ((value integer?))]) ;; allow 64-bit
          (contract-out [struct Reg ((name symbol?))])
          (contract-out [struct Deref ((reg symbol?) (offset fixnum?))])
          (contract-out [struct Instr ((name symbol?) (arg* arg-list?))])
          (contract-out [struct Callq ((target symbol?) (arity fixnum?))])
          (contract-out [struct IndirectCallq ((target arg?) (arity fixnum?))])
+         (contract-out [struct IndirectJmp ((target arg?))])
          (struct-out Retq)
          (contract-out [struct Jmp ((target symbol?))])
          (contract-out [struct TailJmp ((target arg?) (arity fixnum?))])
@@ -342,28 +342,6 @@ Changelog:
                 (csp ast port mode)]
                ))))])
 
-(struct CFG (block*) #:transparent #:property prop:custom-print-quotable 'never
-  #:methods gen:custom-write
-  [(define write-proc
-     (let ([csp (make-constructor-style-printer
-                 (lambda (obj) 'CFG)
-                 (lambda (obj) (list (CFG-block* obj))))])
-       (lambda (ast port mode)
-         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
-                (let ([recur (make-recur port mode)])
-                  (match ast
-                    [(CFG G)
-                     (for/list ([(label tail) (in-dict G)])
-                       (write-string (symbol->string label) port)
-                       (write-string ":" port)
-                       (newline port)
-                       (write-string "    " port)
-                       (recur tail port)
-                       (newline port))]))]
-               [(eq? (AST-output-syntax) 'abstract-syntax)
-                (csp ast port mode)]
-               ))))])
-     
 (define (print-info info port mode)
   (let ([recur (make-recur port mode)])
     (for ([(label data) (in-dict info)])
@@ -432,6 +410,26 @@ Changelog:
                        (newline-and-indent port col)
                        (write-string "   " port) ;; indent body
                        (recur rhs port)
+                       (write-string ")" port)
+                       )]))]
+               [(eq? (AST-output-syntax) 'abstract-syntax)
+                (csp ast port mode)]
+               ))))])
+
+(struct GetBang (var)  #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+                 (lambda (obj) 'GetBang)
+                 (lambda (obj) (list (GetBang-var obj))))])
+       (lambda (ast port mode)
+         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+                (let ([recur (make-recur port mode)])
+                  (match ast
+                    [(GetBang var)
+                     (let-values ([(line col pos) (port-next-location port)])
+                       (write-string "(get! " port)
+                       (write-string (symbol->string var) port)
                        (write-string ")" port)
                        )]))]
                [(eq? (AST-output-syntax) 'abstract-syntax)
@@ -536,7 +534,7 @@ Changelog:
                 (csp ast port mode)]
                ))))])
   
-(struct CProgram (info CFG)
+(struct CProgram (info blocks)
   #:transparent
   #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
@@ -544,16 +542,16 @@ Changelog:
      (let ([csp (make-constructor-style-printer
                  (lambda (obj) 'CProgram)
                  (lambda (obj) (list (CProgram-info obj)
-                                     (CProgram-CFG obj))))])
+                                     (CProgram-blocks obj))))])
        (lambda (ast port mode)
          (cond [(eq? (AST-output-syntax) 'concrete-syntax)
                 (let ([recur (make-recur port mode)])
                   (match ast
-                    [(CProgram info G)
+                    [(CProgram info blocks)
                      (write-string "program:" port)
                      (newline port)
                      (print-info info port mode)
-                     (for/list ([(label tail) (in-dict G)])
+                     (for/list ([(label tail) (in-dict blocks)])
                        (write-string (symbol->string label) port)
                        (write-string ":" port)
                        (newline port)
@@ -564,7 +562,7 @@ Changelog:
                 (csp ast port mode)]
                ))))])
 
-(struct X86Program (info CFG)
+(struct X86Program (info blocks)
   #:transparent
   #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
@@ -572,16 +570,16 @@ Changelog:
      (let ([csp (make-constructor-style-printer
                  (lambda (obj) 'X86Program)
                  (lambda (obj) (list (X86Program-info obj)
-                                     (X86Program-CFG obj))))])
+                                     (X86Program-blocks obj))))])
        (lambda (ast port mode)
          (cond [(eq? (AST-output-syntax) 'concrete-syntax)
                 (let ([recur (make-recur port mode)])
                   (match ast
-                    [(X86Program info G)
+                    [(X86Program info blocks)
                      (write-string "program:" port)
                      (newline port)
                      (print-info info port mode)
-                     (for/list ([(label tail) (in-dict G)])
+                     (for/list ([(label tail) (in-dict blocks)])
                        (write-string (symbol->string label) port)
                        (write-string ":" port)
                        (newline port)
@@ -738,6 +736,10 @@ Changelog:
        (write-string " " port)
        (write-type ty port))
      (write-string ")" port)]
+    [`(Vectorof ,ty)
+     (write-string "(Vectorof " port)
+     (write-type ty port)
+     (write-string ")" port)]
     [`(,ts ... -> ,rt)
      (write-string "(" port)
      (for ([t ts])
@@ -787,6 +789,8 @@ Changelog:
                        (write-string " " port)
                        (write-type rty port)
                        (newline-and-indent port col)
+                       (print-info info port mode)
+                       (newline-and-indent port col)
                        (write-string "   " port)
                        (cond [(list? body)
                               (for ([block body])
@@ -806,6 +810,28 @@ Changelog:
                               (recur body port)])
                        (newline-and-indent port col)            
                        (write-string ")" port)
+                       )]))]
+               [(eq? (AST-output-syntax) 'abstract-syntax)
+                (csp ast port mode)]
+               ))))])
+
+(struct StructDef (name field*) #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+                 (lambda (obj) 'StructDef)
+                 (lambda (obj) (list (StructDef-name obj) (StructDef-field* obj))))])
+       (lambda (ast port mode)
+         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+                (let ([recur (make-recur port mode)])
+                  (match ast
+                    [(StructDef name ps)
+                     (let-values ([(line col pos) (port-next-location port)])
+                       (write-string "(struct " port)
+                       (write-string (symbol->string name) port)
+                       (write-string "(" port)
+                       (write-params ps port)
+                       (write-string "))" port)
                        )]))]
                [(eq? (AST-output-syntax) 'abstract-syntax)
                 (csp ast port mode)]
@@ -913,38 +939,19 @@ Changelog:
             (csp ast port mode)]
            ))))])
 
-(struct FunRef (name) #:transparent #:property prop:custom-print-quotable 'never
+(struct FunRef (name arity) #:transparent #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
   [(define write-proc
      (let ([csp (make-constructor-style-printer
-             (lambda (obj) 'FunRef)
-             (lambda (obj) (list (FunRef-name obj))))])
+                 (lambda (obj) 'FunRef)
+                 (lambda (obj) (list (FunRef-name obj)
+                                     (FunRef-arity obj))))])
        (lambda (ast port mode)
      (cond [(eq? (AST-output-syntax) 'concrete-syntax)
               (let ([recur (make-recur port mode)])
                 (match ast
-                  [(FunRef f)
-                   (write-string "(fun-ref " port)
-                   (write-string (symbol->string f) port)
-                   (write-string ")" port)
-                   ]))]
-           [(eq? (AST-output-syntax) 'abstract-syntax)
-            (csp ast port mode)]
-           ))))])
-           
-(struct FunRefArity (name arity) #:transparent #:property prop:custom-print-quotable 'never
-  #:methods gen:custom-write
-  [(define write-proc
-     (let ([csp (make-constructor-style-printer
-                 (lambda (obj) 'FunRefArity)
-                 (lambda (obj) (list (FunRefArity-name obj)
-                                     (FunRefArity-arity obj))))])
-       (lambda (ast port mode)
-     (cond [(eq? (AST-output-syntax) 'concrete-syntax)
-              (let ([recur (make-recur port mode)])
-                (match ast
-                  [(FunRefArity f n)
-                   (write-string "(fun-ref-arity" port)
+                  [(FunRef f n)
+                   (write-string "(fun-ref" port)
                    (write-string " " port)
                    (write-string (symbol->string f) port)
                    (write-string " " port)
@@ -1115,6 +1122,20 @@ Changelog:
        [(Allocate amount type)
         (let-values ([(line col pos) (port-next-location port)])
           (write-string "(allocate " port)
+          (write amount port)
+          (write-string " " port)
+          (write-type type port)
+          (write-string ")" port)
+          )
+        ]))])
+
+(struct AllocateHom (amount type) #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define (write-proc ast port mode)
+     (match ast
+       [(AllocateHom amount type)
+        (let-values ([(line col pos) (port-next-location port)])
+          (write-string "(allocate-hom " port)
           (write amount port)
           (write-string " " port)
           (write-type type port)
@@ -1308,16 +1329,46 @@ Changelog:
 
 (struct IndirectCallq (target arity) #:transparent #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
-  [(define (write-proc ast port mode)
-     (let ([recur (make-recur port mode)])
-       (match ast
-         [(IndirectCallq target arity)
-          (let-values ([(line col pos) (port-next-location port)])
-            (write-string "callq" port)
-            (write-string " " port)
-            (write-string "*" port)
-            (recur target port)
-            (newline-and-indent port col))])))])
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+                 (lambda (obj) 'IndirectCallq)
+                 (lambda (obj) (list (IndirectCallq-target obj)
+                                     (IndirectCallq-arity obj))))])
+       (lambda (ast port mode)
+         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+                (let ([recur (make-recur port mode)])
+                  (match ast
+                    [(IndirectCallq target arity)
+                     (let-values ([(line col pos) (port-next-location port)])
+                       (write-string "callq" port)
+                       (write-string " " port)
+                       (write-string "*" port)
+                       (recur target port)
+                       (newline-and-indent port col))]))]
+               [(eq? (AST-output-syntax) 'abstract-syntax)
+                (csp ast port mode)]
+               ))))])
+
+(struct IndirectJmp (target) #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+                 (lambda (obj) 'IndirectJmp)
+                 (lambda (obj) (list (IndirectJmp-target obj))))])
+       (lambda (ast port mode)
+         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+                (let ([recur (make-recur port mode)])
+                  (match ast
+                    [(IndirectJmp target)
+                     (let-values ([(line col pos) (port-next-location port)])
+                       (write-string "jmp" port)
+                       (write-string " " port)
+                       (write-string "*" port)
+                       (recur target port)
+                       (newline-and-indent port col))]))]
+               [(eq? (AST-output-syntax) 'abstract-syntax)
+                (csp ast port mode)]
+               ))))])
 
 (struct Jmp (target) #:transparent #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
@@ -1455,14 +1506,14 @@ Changelog:
     [(Apply e es) #t]
     [(GlobalValue n) #t]
     [(Allocate n t) #t]
+    [(AllocateHom n t) #t]
     [(AllocateProxy t) #t]
     [(AllocateClosure n t a) #t]
     [(If cnd thn els) #t]
     [(HasType e t) #t]
     [(Cast e src tgt) #t]
     [(Collect s) #t] ;; update figure in book? see expose-alloc-exp in vectors.rkt
-    [(FunRef f) #t]
-    [(FunRefArity f n) #t]
+    [(FunRef f n) #t]
     [(Call f e*) #t]
     [(Inject e t) #t]
     [(Project e t) #t]
@@ -1471,6 +1522,7 @@ Changelog:
     [(Closure arity fvs) #t]
     [(WhileLoop cnd body) #t]
     [(SetBang x rhs) #t]
+    [(GetBang x) #t]
     [(Begin es body) #t]
     [(Value v) #t]
     [(Inst e ty ts) #t]
@@ -1494,6 +1546,7 @@ Changelog:
 (define (type? t)
   (match t
     [`(Vector ,ts ...) #t]
+    [`(Vectorof ,t) #t]
     [`(PVector ,ts ...) #t]
     [`(All ,xs ,t) #t]
     ['Integer #t]
@@ -1517,6 +1570,8 @@ Changelog:
     [(Assign x e) #t]
     [(Collect n) #t]
     [(Prim 'vector-set! es) #t]
+    [(Prim 'any-vector-set! es) #t]
+    [(Prim 'vectorof-set! es) #t]
     [(Prim 'read '()) #t]
     [(Call f arg) #t]
     [else #f]))
@@ -1550,7 +1605,7 @@ Changelog:
     [(ByteReg r) #t]
     [(? symbol?) #t] ;; for condition code in set instruction
     [(Global name) #t]
-    [(FunRef f) #t]
+    [(FunRef f n) #t]
     [else #f]))
 
 (define (arg-list? es)
@@ -1565,6 +1620,7 @@ Changelog:
     [(Retq) #t]
     [(IndirectCallq a n) #t]
     [(Jmp label) #t]
+    [(IndirectJmp target) #t]
     [(TailJmp a n) #t]
     [(JmpIf c t) #t]
     [else #f]
@@ -1580,11 +1636,12 @@ Changelog:
 
 
 (define src-primitives
-  '(read + - eq? < <= > >= and or not
+  '(read + - * eq? < <= > >= and or not
          vector vector-ref vector-set! vector-length
          procedure-arity
          boolean? integer? vector? procedure? void?
-         any-vector-ref any-vector-set! any-vector-length))
+         any-vector-ref any-vector-set! any-vector-length
+         make-vector))
 
 (define (parse-exp e)
   (match e
@@ -1625,6 +1682,8 @@ Changelog:
      (Def f ps rty '() (parse-exp body))]
     [`(define (,f ,xs ...) ,body) ;; dynamically typed definition
      (Def f xs 'Any '() (parse-exp body))]
+    [`(struct ,name ,fields #:mutable)
+     (StructDef name fields)]    
     [`(: ,name ,type)
      (Decl name type)]
     ))
@@ -1654,6 +1713,81 @@ Changelog:
     [(Apply e es)
      `(,(unparse-exp e) ,@(map unparse-exp es))]
     ))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Printing x86
+
+(define print-x86-class
+  (class object%
+    (super-new)
+
+    (define/public (print-x86-imm e)
+      (match e
+        [(Deref reg i)
+         (format "~a(%~a)" i reg)]
+        [(Imm n) (format "$~a" n)]
+        [(Reg r) (format "%~a" r)]
+        [(ByteReg r) (format "%~a" r)]
+        #;[(FunRef label n) (format "~a(%rip)" (label-name label))]
+        [(Global label) (format "~a(%rip)" (label-name label))]
+        ))
+    
+    (define/public (print-x86-instr e)
+      (verbose "print-x86-instr" e)
+      (match e
+        [(Callq f n)
+         (format "\tcallq\t~a\n" (label-name (symbol->string f)))]
+        [(IndirectCallq f n)
+         (format "\tcallq\t*~a\n" (print-x86-imm f))]
+        [(Jmp label) (format "\tjmp ~a\n" (label-name label))]
+        [(IndirectJmp target) (format "\tjmp *~a\n" (print-x86-imm target))]
+        [(Instr 'set (list cc d)) (format "\tset~a\t~a\n" cc (print-x86-imm d))]
+        [(Instr 'cmpq (list s1 s2))
+         (format "\tcmpq\t~a, ~a\n" (print-x86-imm s1) (print-x86-imm s2))]
+        [(Instr instr-name (list s d))
+         (format "\t~a\t~a, ~a\n" instr-name
+                 (print-x86-imm s) 
+                 (print-x86-imm d))]
+        [(Instr instr-name (list d))
+         (format "\t~a\t~a\n" instr-name (print-x86-imm d))]
+        [(Retq)
+         "\tretq\n"]
+        [(JmpIf cc label) (format "\tj~a ~a\n" cc (label-name label))]
+        [else (error "print-x86-instr, unmatched" e)]))
+    
+    (define/public (print-x86-block e)
+      (match e
+        [(Block info ss)
+         (string-append* (for/list ([s ss]) (print-x86-instr s)))]
+        [else (error "print-x86-block unhandled " e)]))
+
+    (define/public (print-x86 e)
+      (match e
+        [(X86Program info blocks)
+         (string-append
+          (string-append*
+           (for/list ([(label block) (in-dict blocks)])
+             (string-append
+              (if (eq? label 'main)
+                  (format "\t.globl ~a\n" (label-name 'main))
+                  "")
+              (string-append
+               "\t.align 8\n"
+               (format "~a:\n" (label-name label))
+               (print-x86-block block)
+               "\n"))))
+          "\n"
+          )]
+        [else (error "print-x86, unmatched" e)]
+        ))
+    
+    ))
+
+
+(define (print-x86 x86-ast)
+  (define printer (new print-x86-class))
+  (send printer print-x86 x86-ast))
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -1845,14 +1979,14 @@ Changelog:
 (define ((check-passes-suite name typechecker passes initial-interp) test-name)
   (test-suite
    test-name
-   (let* ([input-file-name (format "tests/~a.in" test-name)]
-          [result-file-name (format "tests/~a.res" test-name)]
-          [program-name (format "tests/~a.rkt" test-name)]
+   (let* ([input-file-name (format "./tests/~a.in" test-name)]
+          [result-file-name (format "./tests/~a.res" test-name)]
+          [program-name (format "./tests/~a.rkt" test-name)]
           [sexp (read-program program-name)]
-          [type-error-expected (file-exists? (format "tests/~a.tyerr" test-name))]
+          [type-error-expected (file-exists? (format "./tests/~a.tyerr" test-name))]
           [tsexp ((check-exception name test-name type-error-expected)
                   (thunk (test-typecheck typechecker sexp)))]
-          [error-expected (file-exists? (format "tests/~a.err" test-name))]
+          [error-expected (file-exists? (format "./tests/~a.err" test-name))]
           [checker (check-exception name test-name error-expected)])
      (test-case
        "typecheck"  
@@ -1973,12 +2107,22 @@ Changelog:
                                 (loop (cdr passes) new-p)
                                 ]))])
               (cond [(string? x86)
+                     (error "error, compiler should produce x86 AST, not a string")
                      (write-string x86 out-file)
                      (newline out-file)
                      (flush-output out-file)
                      #t]
                     [else
-                     (error "compiler did not produce x86 output")])
+                     #;(error "compiler did not produce x86 output")
+                     (define x86-str (print-x86 x86))
+                     (write-string x86-str out-file)
+                     (newline out-file)
+                     (flush-output out-file)
+                     (cond [(> (debug-level) 0)
+                            (display "x86 output:\n")
+                            (display x86-str)]
+                           [else  '()])
+                     #t])
               )
             #f)
         ))))
@@ -2091,22 +2235,22 @@ Changelog:
      "compiler tests"
      (for/list ([test-number (in-list test-nums)])
        (let* ([test-name (format "~a_~a" test-family test-number)]
-              [type-error-expected (file-exists? (format "tests/~a.tyerr" test-name))]
-              [typechecks (compiler (format "tests/~a.rkt" test-name))])
+              [type-error-expected (file-exists? (format "./tests/~a.tyerr" test-name))]
+              [typechecks (compiler (format "./tests/~a.rkt" test-name))])
          (test-suite
           test-name
           (if type-error-expected
               (test-case "typecheck" (check-false typechecks "Expected expression to fail typechecking"))
 	      (if (not typechecks) (fail "Expected expression to typecheck")
 		  (test-case "code generation"
-			     (let ([gcc-output (system (format "g++ -g -march=x86-64 runtime.o tests/~a.s -o tests/~a.out" test-name test-name))])
+			     (let ([gcc-output (system (format "gcc -g -march=x86-64 -std=c99 runtime.o ./tests/~a.s -o ./tests/~a.out" test-name test-name))])
 			       (if (not gcc-output) (fail "Failed during assembly")
-				   (let ([input (if (file-exists? (format "tests/~a.in" test-name))
-						    (format " < tests/~a.in" test-name)
+				   (let ([input (if (file-exists? (format "./tests/~a.in" test-name))
+						    (format " < ./tests/~a.in" test-name)
 						    "")]
-					 [output (if (file-exists? (format "tests/~a.res" test-name))
+					 [output (if (file-exists? (format "./tests/~a.res" test-name))
 						     (call-with-input-file
-							 (format "tests/~a.res" test-name)
+							 (format "./tests/~a.res" test-name)
 						       (lambda (f) (read-line f)))
 						     ;"42")]
 						     (call-with-input-file
@@ -2127,8 +2271,11 @@ Changelog:
 (define (compiler-tests name typechecker passes test-family test-nums)
   (run-tests (compiler-tests-suite name typechecker passes test-family test-nums) (test-verbosity)))
 
-;(define (compiler-tests-gui name typechecker passes test-family test-nums)
-;  (test/gui (compiler-tests-suite name typechecker passes test-family test-nums)))
+(define (compiler-tests-gui name typechecker passes test-family test-nums)
+  ;; Disable this for now to run on a linux server. -Jeremy
+  #;(test/gui (compiler-tests-suite name typechecker passes test-family test-nums))
+  (void)
+  )
 
 
 ;; Takes a function of 1 argument (or #f) and Racket expression, and
@@ -2213,6 +2360,8 @@ Changelog:
         ;; need at least 2 arg-registers, see limit-functions -Jeremy
         (set! arg-registers (vector 'rdi 'rsi))
         (set! registers-for-alloc (vector  'rsi 'rdi 'rbx))
+        ; for the example in the register allocation chapter 
+        ;(set! registers-for-alloc (vector  'rcx))
         )
       (begin
         ;; The following ordering is specified in the x86-64 conventions.
@@ -2370,10 +2519,10 @@ Changelog:
     (dict-set d k v)))
 
 ;; This parameter (dynamically scoped thingy) is used for goto.
-(define get-CFG (make-parameter '()))
+(define get-basic-blocks (make-parameter '()))
 
 (define (goto-label label)
-  (dict-ref (get-CFG) label))
+  (dict-ref (get-basic-blocks) label))
 
 (define (symbol-append s1 s2)
   (string->symbol (string-append (symbol->string s1) (symbol->string s2))))
@@ -2381,11 +2530,12 @@ Changelog:
 (define (any-tag ty)
   (match ty
     ['Integer 1]		;; 001
-    ['Boolean 4]		;; 100
-    ['Void 5]                   ;; 101
     [`(Vector ,ts ...) 2]	;; 010
     [`(PVector ,ts ...) 2]
     [`(,ts ... -> ,rt) 3]	;; 011
+    ['Boolean 4]		;; 100
+    ['Void 5]                   ;; 101
+    [`(Vectorof ,t) 6]          ;; 110
     [else (error "in any-tag, unrecognized type" ty)]
     ))
 

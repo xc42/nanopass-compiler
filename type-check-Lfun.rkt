@@ -1,22 +1,36 @@
 #lang racket
 (require "utilities.rkt")
-(require "type-check-Rvec.rkt")
-(provide type-check-Rfun type-check-Rfun-class)
+(require "type-check-Lvecof.rkt")
+(provide type-check-Lfun type-check-Lfun-class)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;  Functions                                                                 ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; type-check-Rfun
+;; type-check-Lfun
 
 ;; TODO: Don't allow eq? on function types. -Jeremy
 
-(define type-check-Rfun-class
-  (class type-check-Rvec-class
+(define type-check-Lfun-class
+  (class type-check-Lvecof-class
     (super-new)
     (inherit check-type-equal?)
 
+    (field [max-parameters 32])
+
+    ;; Need lenient checking for closure conversion.
+    ;; Putting it here instead of in lambda because the C-level type
+    ;; checkers also need it and inherit from this type checker.
+
+    (define/override (type-equal? t1 t2)
+      (match* (t1 t2)
+        [(`(,ts1 ... -> ,rt1) `(,ts2 ... -> ,rt2))
+         (and (for/and ([t1 ts1] [t2 ts2])
+                (type-equal? t1 t2))
+              (type-equal? rt1 rt2))]
+        [(other wise) (super type-equal? t1 t2)]))
+    
     (define/public (type-check-apply env e es)
       (define-values (e^ ty) ((type-check-exp env) e))
       (define-values (e* ty*) (for/lists (e* ty*) ([e (in-list es)])
@@ -31,8 +45,8 @@
     (define/override (type-check-exp env)
       (lambda (e)
         (match e
-          [(FunRef f)
-           (values (FunRef f)  (dict-ref env f))]
+          [(FunRef f n)
+           (values (FunRef f n)  (dict-ref env f))]
           [(Apply e es)
            (define-values (e^ es^ rt) (type-check-apply env e es))
            (values (Apply e^ es^) rt)]
@@ -46,6 +60,9 @@
       (lambda (e)
         (match e
           [(Def f (and p:t* (list `[,xs : ,ps] ...)) rt info body)
+           (unless (< (length xs) max-parameters)
+             (error 'type-check "~a has too many parameters, max is ~a"
+                    f max-parameters))
            (define new-env (append (map cons xs ps) env))
            (define-values (body^ ty^) ((type-check-exp new-env) body))
            (check-type-equal? ty^ rt body)
@@ -79,6 +96,6 @@
         [else (error 'type-check "unrecognized ~a" e)]))
     ))
 
-(define (type-check-Rfun p)
-  (send (new type-check-Rfun-class) type-check-program p))
+(define (type-check-Lfun p)
+  (send (new type-check-Lfun-class) type-check-program p))
 

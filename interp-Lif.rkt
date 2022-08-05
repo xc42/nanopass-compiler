@@ -1,27 +1,24 @@
 #lang racket
 (require racket/fixnum)
 (require "utilities.rkt")
-(require "interp-Rvar.rkt")
-(provide interp-Rif interp-Rif-class)
+(require "interp-Lvar.rkt")
+(provide interp-Lif interp-Lif-class)
 
 ;; Note to maintainers of this code:
 ;;   A copy of this interpreter is in the book and should be
 ;;   kept in sync with this code.
 
-(define interp-Rif-class
-  (class interp-Rvar-class
+(define interp-Lif-class
+  (class interp-Lvar-class
     (super-new)
 
     (define/public (interp-op op)
-      (verbose "Rif/interp-op" op)
+      (verbose "Lif/interp-op" op)
       (match op
         ['+ fx+]
         ['- fx-]
         ['read read-fixnum]
         ['not (lambda (v) (match v [#t #f] [#f #t]))]
-        ['or (lambda (v1 v2)
-               (cond [(and (boolean? v1) (boolean? v2))
-                      (or v1 v2)]))]
         ['eq? (lambda (v1 v2)
                 (cond [(or (and (fixnum? v1) (fixnum? v2))
                            (and (boolean? v1) (boolean? v2))
@@ -56,14 +53,19 @@
          (match v1
            [#t (match (recur e2) [#t #t] [#f #f])]
            [#f #f])]
+        [(Prim 'or (list e1 e2))
+         (define v1 (recur e1))
+         (match v1
+           [#t #t]
+           [#f (match (recur e2) [#t #t] [#f #f])])]
         [(Prim op args)
          (apply (interp-op op) (for/list ([e args]) (recur e)))]
         [else ((super interp-exp env) e)]
         ))
     ))
 
-(define (interp-Rif p)
-  (send (new interp-Rif-class) interp-program p))
+(define (interp-Lif p)
+  (send (new interp-Lif-class) interp-program p))
 
 #;(define (interp-exp env)
-  (send (new interp-Rif-class) interp-exp env))
+  (send (new interp-Lif-class) interp-exp env))

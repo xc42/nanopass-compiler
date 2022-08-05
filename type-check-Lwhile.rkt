@@ -2,11 +2,17 @@
 (require graph)
 ;(require "multigraph.rkt")
 (require "utilities.rkt")
+<<<<<<< HEAD:type-check-Rwhile.rkt
 ;(require (only-in "any.rkt" compile-Rany))
 (require (only-in "type-check-Rlambda.rkt" typed-vars))
 (require "type-check-Rany.rkt")
 (require "type-check-Cany.rkt")
 (provide type-check-Rwhile type-check-Rwhile-class)
+=======
+(require "type-check-Lif.rkt")
+(require "type-check-Cif.rkt")
+(provide type-check-Lwhile type-check-Lwhile-class)
+>>>>>>> upstream/master:type-check-Lwhile.rkt
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;                           while, begin, set!
@@ -14,15 +20,24 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; type-check-Rwhile
+;; type-check-Lwhile
 
-(define type-check-Rwhile-class
-  (class type-check-Rany-class
+(define type-check-Lwhile-class
+  (class type-check-Lif-class
     (super-new)
     (inherit check-type-equal?)
 
+    ;; lenient type checking for '_
+    (define/override (type-equal? t1 t2)
+      (debug 'type-equal? "lenient" t1 t2)
+      (match* (t1 t2)
+        [('_ t2) #t]
+        [(t1 '_) #t]
+        [(other wise) (equal? t1 t2)]))
+    
     (define/override (type-check-exp env)
       (lambda (e)
+        (debug 'type-check-exp "Lwhile" e)
         (define recur (type-check-exp env))
         (match e
           [(SetBang x rhs)
@@ -30,6 +45,8 @@
            (define varT (dict-ref env x))
            (check-type-equal? rhsT varT e)
            (values (SetBang x rhs^) 'Void)]
+          [(GetBang x)
+           (values (GetBang x) (dict-ref env x))]
           [(WhileLoop cnd body)
            (define-values (cnd^ Tc) (recur cnd))
            (check-type-equal? Tc 'Boolean e)
@@ -40,9 +57,10 @@
              (for/lists (l1 l2) ([e es]) (recur e)))
            (define-values (body^ Tbody) (recur body))
            (values (Begin es^ body^) Tbody)]
+          [(Void) (values (Void) 'Void)]
           [else ((super type-check-exp env) e)])))
     ))
 
-(define (type-check-Rwhile p)
-  (send (new type-check-Rwhile-class) type-check-program p))
+(define (type-check-Lwhile p)
+  (send (new type-check-Lwhile-class) type-check-program p))
 

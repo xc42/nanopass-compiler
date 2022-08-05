@@ -1,27 +1,36 @@
 #lang racket
 (require "utilities.rkt")
 (require "type-check-Cvar.rkt")
-(require "type-check-Rif.rkt")
-(provide type-check-Rvec type-check-Rvec-class)
+(require "type-check-Lwhile.rkt")
+(provide type-check-Lvec type-check-Lvec-class)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;  Tuples (aka Vectors)                                                      ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; type-check-Rvec
+;; type-check-Lvec
 
-(define type-check-Rvec-class
-  (class type-check-Rif-class
+(define type-check-Lvec-class
+  (class type-check-Lwhile-class
     (super-new)
     (inherit check-type-equal?)
 
+    (define/override (type-equal? t1 t2)
+      (debug 'type-equal? "lenient" t1 t2)
+      (match* (t1 t2)
+        [(`(Vector ,ts1 ...) `(Vector ,ts2 ...))
+         (for/and ([t1 ts1] [t2 ts2])
+           (type-equal? t1 t2))]
+        [(other wise) (super type-equal? t1 t2)]))
+    
     (define/override (type-check-exp env)
       (lambda (e)
         (define recur (type-check-exp env))
         (match e
-          [(Void) (values (Void) 'Void)]
           [(Prim 'vector es)
+           (unless (<= (length es) 50)
+             (error 'type-check "vector too large ~a, max is 50" (length es)))
            (define-values (e* t*) (for/lists (e* t*) ([e es]) (recur e)))
            (define t `(Vector ,@t*))
            (values (HasType (Prim 'vector e*) t)  t)]
@@ -72,12 +81,12 @@
           )))
     ))
 
-(define (type-check-Rvec p)
-  (send (new type-check-Rvec-class) type-check-program p))
+(define (type-check-Lvec p)
+  (send (new type-check-Lvec-class) type-check-program p))
 
 #;(define (type-check-exp env)
-  (send (new type-check-Rvec-class) type-check-exp env))
+  (send (new type-check-Lvec-class) type-check-exp env))
 
 #;(define (type-equal? t1 t2)
-  (send (new type-check-Rvec-class) type-equal? t1 t2))
+  (send (new type-check-Lvec-class) type-equal? t1 t2))
 

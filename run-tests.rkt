@@ -2,19 +2,8 @@
 #lang racket
 
 (require "utilities.rkt")
-(require "interp-Rvar.rkt")
-(require "interp-Rif.rkt")
-(require "type-check-Rlambda.rkt")
-(require "type-check-Rwhile.rkt")
-(require "interp-Rvec.rkt")
-(require "interp-Rvec-prime.rkt")
-(require "interp-Rfun.rkt")
-(require "interp-Rfun-prime.rkt")
-(require "interp-Rlambda.rkt")
-(require "interp-Clambda.rkt")
-(require "interp-Rwhile.rkt")
-
-
+(require "interp-Lvar.rkt")
+(require "interp-Cvar.rkt")
 (require "interp.rkt")
 (require "compiler.rkt")
 ;; (debug-level 1)
@@ -125,6 +114,11 @@
 ;(interp-tests "r5" type-check-Rlambda r5-passes interp-Rlambda "r5_test" (tests-for "r5"))
 ;(compiler-tests "r5" type-check-Rlambda r5-passes "r5_test" (tests-for "r5"))
 
+(interp-tests "var" #f compiler-passes interp-Lvar "var_test" (tests-for "var"))
+
+;; Uncomment the following when all the passes are complete to
+;; test the final x86 code.
+;; (compiler-tests "var" #f compiler-passes "var_test" (tests-for "var"))
 
 (define r8-passes
   `(("shrink" ,shrink ,interp-Rwhile)

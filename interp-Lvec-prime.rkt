@@ -1,10 +1,10 @@
 #lang racket
-(require "interp-Rvec.rkt")
+(require "interp-Lvec.rkt")
 (require "utilities.rkt")
 (require (prefix-in runtime-config: "runtime-config.rkt"))
-(provide interp-Rvec-prime interp-Rvec-prime-mixin interp-Rvec-prime-class)
+(provide interp-Lvec-prime interp-Lvec-prime-mixin interp-Lvec-prime-class)
 
-(define (interp-Rvec-prime-mixin super-class)
+(define (interp-Lvec-prime-mixin super-class)
   (class super-class
     (super-new)
 
@@ -33,7 +33,7 @@
 	(let-values ([(start stop name vect) (fetch-page addr)])
 	  (let ([value (vector-ref vect (arithmetic-shift (- addr start) -3))])
 	    (when (equal? value uninitialized)
-	      (error 'interp-Rvec-class/memory-read
+	      (error 'interp-Lvec-class/memory-read
 		     "read uninitialized memory at address ~s"
 		     addr))
 	    value))))
@@ -124,36 +124,13 @@
         (match m
           [`() (error 'fetch-page (fmt-err addr memory))]
           [`((page ,min ,max ,name ,vect) . ,rest-memory)
-           ;(copious "Rvec/fetch page" addr min max name vect)
+           ;(copious "Lvec/fetch page" addr min max name vect)
            ; vect is too large to print, makes things hard to read.
-           ;(copious "Rvec/fetch page" addr min max name)
+           ;(copious "Lvec/fetch page" addr min max name)
            (if (and (<= min addr) (< addr max))
                (values min max name vect)
                (search rest-memory))]
           [other (error 'fetch-page "unmatched ~a" m)])))
-
-    #;(define/override (primitives)
-      (set-union (super primitives)
-		 (set 'vector  'vector-ref 'vector-set! vector-length
-              ;; todo: move the following to a different interpreter -Jeremy
-                      'vector-proxy)))
-
-    #;(define/override (interp-op op)
-      (match op
-	['eq? (lambda (v1 v2)
-		(cond [(or (and (fixnum? v1) (fixnum? v2))
-			   (and (boolean? v1) (boolean? v2))
-			   (and (vector? v1) (vector? v2))
-                           (and (void? v1) (void? v2)))
-		       (eq? v1 v2)]))]
-        ['vector-proxy
-         (lambda (vec rs ws)
-           `(vector-proxy ,vec ,rs ,ws))]
-        ['vector vector]
-	['vector-length vector-length]
-	['vector-ref vector-ref]
-	['vector-set! vector-set!]
-	[else (super interp-op op)]))
 
     (define/override (interp-exp env)
       (lambda (ast)
@@ -187,7 +164,7 @@
         ))
     ))
 
-(define interp-Rvec-prime-class (interp-Rvec-prime-mixin interp-Rvec-class))
+(define interp-Lvec-prime-class (interp-Lvec-prime-mixin interp-Lvec-class))
     
-(define (interp-Rvec-prime p)
-  (send (new interp-Rvec-prime-class) interp-program p))
+(define (interp-Lvec-prime p)
+  (send (new interp-Lvec-prime-class) interp-program p))

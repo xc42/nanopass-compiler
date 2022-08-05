@@ -2,21 +2,21 @@
 (require "utilities.rkt")
 (require "type-check-Cvar.rkt")
 (require "type-check-Cif.rkt")
-(require "type-check-Rvec.rkt")
+(require "type-check-Lvec.rkt")
 (require "type-check-Cvec.rkt")
 (require "type-check-Cfun.rkt")
-(require "type-check-Rlambda.rkt")
-(provide type-check-Rany type-check-Rany-class)
+(require "type-check-Llambda.rkt")
+(provide type-check-Lany type-check-Lany-class)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;  Type Checker for the Any type and inject, project, etc.
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; type-check-Rany
+;; type-check-Lany
 
-(define type-check-Rany-class
-  (class type-check-Rlambda-class
+(define type-check-Lany-class
+  (class type-check-Llambda-class
     (super-new)
     (inherit check-type-equal?)
 
@@ -34,19 +34,19 @@
     (define/public (type-predicates)
       (set 'boolean? 'integer? 'vector? 'procedure? 'void?))
 
-    (define/public (combine-types t1 t2)
+    (define/public (join-types t1 t2)
       (match (list t1 t2)
         [(list '_ t2) t2]
         [(list t1 '_) t1]
         [(list `(Vector ,ts1 ...)
                `(Vector ,ts2 ...))
          `(Vector ,@(for/list ([t1 ts1] [t2 ts2])
-                      (combine-types t1 t2)))]
+                      (join-types t1 t2)))]
         [(list `(,ts1 ... -> ,rt1)
                `(,ts2 ... -> ,rt2))
          `(,@(for/list ([t1 ts1] [t2 ts2])
-               (combine-types t1 t2))
-           -> ,(combine-types rt1 rt2))]
+               (join-types t1 t2))
+           -> ,(join-types rt1 rt2))]
         [else
          t1]))
 
@@ -60,6 +60,7 @@
          (for/and ([t ts]) (eq? t 'Any))]
         [`(Vector ,ts ...)
          (for/and ([t ts]) (eq? t 'Any))]
+        ['(Vectorof Any) #t]
         [`(,ts ... -> ,rt)
          (and (eq? rt 'Any) (for/and ([t ts]) (eq? t 'Any)))]
         [else
@@ -68,20 +69,25 @@
 
     (define/override (type-check-exp env)
       (lambda (e)
+        (debug 'type-check-exp "Lany" e)
         (define recur (type-check-exp env))
         (match e
-          ;; Change If to use combine-types
+          ;; Change If to use join-types
           [(If cnd thn els)
            (define-values (cnd^ Tc) (recur cnd))
            (define-values (thn^ Tt) (recur thn))
            (define-values (els^ Te) (recur els))
            (check-type-equal? Tc 'Boolean cnd)
            (check-type-equal? Tt Te e)
-           (values (If cnd^ thn^ els^) (combine-types Tt Te))]
+           (values (If cnd^ thn^ els^) (join-types Tt Te))]
           [(Prim 'any-vector-length (list e1))
            (define-values (e1^ t1) (recur e1))
            (check-type-equal? t1 'Any e)
            (values (Prim 'any-vector-length (list e1^)) 'Integer)]
+          [(Prim 'any-vectorof-length (list e1))
+           (define-values (e1^ t1) (recur e1))
+           (check-type-equal? t1 'Any e)
+           (values (Prim 'any-vectorof-length (list e1^)) 'Integer)]
           [(Prim 'any-vector-ref (list e1 e2))
            (define-values (e1^ t1) (recur e1))
            (define-values (e2^ t2) (recur e2))
@@ -131,6 +137,6 @@
 
     ))
 
-(define (type-check-Rany p)
-  (send (new type-check-Rany-class) type-check-program p))
+(define (type-check-Lany p)
+  (send (new type-check-Lany-class) type-check-program p))
 
