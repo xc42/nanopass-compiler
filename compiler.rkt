@@ -1,11 +1,9 @@
 #lang racket
 (require racket/set racket/stream)
 (require racket/fixnum)
-(require "interp-Lint.rkt")
-(require "interp-Lvar.rkt")
 (require "utilities.rkt")
 (require "type-check-Clambda.rkt")
-(require "type-check-Rlambda.rkt")
+(require "type-check-Llambda.rkt")
 (require (prefix-in runtime-config:: "runtime-config.rkt"))
 (require graph)
 (require racket/promise)
@@ -38,7 +36,6 @@
 		   [(WhileLoop cnd body) (WhileLoop (f cnd) (f body))]
 		   [else expr]))
 
-;; R5 -> R5
 (define (shrink p)
   (define (shrink-exp e)
 	(match e
@@ -59,45 +56,6 @@
 		   ;['>  (If (Prim 'not `(,(Prim '< new-es))) (If (Prim 'eq? new-es) F T) F)]
 		   [other (Prim op new-es)]))]
 	  [else (map-over-expr shrink-exp e)]))
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Lint examples
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-;; The following compiler pass is just a silly one that doesn't change
-;; anything important, but is nevertheless an example of a pass. It
-;; flips the arguments of +. -Jeremy
-(define (flip-exp e)
-  (match e
-    [(Var x) e]
-    [(Prim 'read '()) (Prim 'read '())]
-    [(Prim '- (list e1)) (Prim '- (list (flip-exp e1)))]
-    [(Prim '+ (list e1 e2)) (Prim '+ (list (flip-exp e2) (flip-exp e1)))]))
-
-(define (flip-Lint e)
-  (match e
-    [(Program info e) (Program info (flip-exp e))]))
-
-
-;; Next we have the partial evaluation pass described in the book.
-(define (pe-neg r)
-  (match r
-    [(Int n) (Int (fx- 0 n))]
-    [else (Prim '- (list r))]))
-
-(define (pe-add r1 r2)
-  (match* (r1 r2)
-    [((Int n1) (Int n2)) (Int (fx+ n1 n2))]
-    [(_ _) (Prim '+ (list r1 r2))]))
-
-(define (pe-exp e)
-  (match e
-    [(Int n) (Int n)]
-    [(Prim 'read '()) (Prim 'read '())]
-    [(Prim '- (list e1)) (pe-neg (pe-exp e1))]
-    [(Prim '+ (list e1 e2)) (pe-add (pe-exp e1) (pe-exp e2))]))
-
-(define (pe-Lint p)
->>>>>>> upstream/master
   (match p
 	[(Program info body)
 	 (ProgramDefs info `(,(Def 'main '() 'Integer '() (shrink-exp body))))]
@@ -109,7 +67,6 @@
 						 `(,(Def 'main '() 'Integer '() (shrink-exp expr)))))]))
 
 
-;; uniquify : R5 -> R5
 (define (uniquify p)
   (define (uniquify-exp env)
 	(lambda (expr)
@@ -145,6 +102,18 @@
 								  ps)])
 						  (Def fn ps rt info ((uniquify-exp init-env) body)))))))])) 
 
+
+(define (reveal-functions p)
+  (let ([fs (for/list ([def (ProgramDefs-def* p)]) 
+					(cons (Def-name def) (length (Def-param* def))))])
+	(letrec ([reveal-functions*
+			   (lambda (expr)
+				 (match expr
+						[(Var v) (let ([f* (assv v fs)]) (if  f* (FunRef v (cdr f*)) expr))]
+						[else (map-over-expr reveal-functions* expr)]))])
+	  (match p
+			 [(? Program?) p]
+			 [(? ProgramDefs?) (map-program-def-body reveal-functions* p)]))))
 
 (define (free-variable expr)
   (match expr
@@ -188,6 +157,7 @@
 	  [(Apply f args) (gather-es (cons f args) (lambda (es^) (Apply (car es^) (cdr es^))))]
 	  [(Begin es* body) (gather-es (cons body es*) (lambda (es^) (Begin (cdr es^) (car es^))))]
 	  [(WhileLoop cnd body) (gather-es `(,cnd ,body) (lambda (es^) (apply WhileLoop es^)))]
+	  [(HasType e t) (gather-es `(,e) (lambda (es^) (HasType (car es^) t)))]
 	  [_ (values expr (set) (set))]))
 
   (define (gather-es es ctor)
@@ -210,9 +180,11 @@
 		(define (convert-expr expr)
 		  (match expr
 			[(Var x) 
-			 (if (assign&free x) 
-			   (Prim 'vector-ref `(,(Var x) ,(Int 0))) 
-			   expr)]
+			 (cond
+			   [(set-member? A x) (if (set-member? F x) 
+									(Prim 'vector-ref `(,(Var x) ,(Int 0))) 
+									(GetBang x))]
+			   [else expr])]
 			[(Let (AssignedFree x) e body) (Let x (Prim 'vector `(,(convert-expr e))) (convert-expr body))]
 			[(SetBang v e) 
 			 (if (assign&free v)
@@ -239,28 +211,13 @@
 		  (Def name ps^ rt info body^^)))))
 
   (map-program-def convert-def p))
-
-
-
-;; R4 -> R4
-(define (reveal-functions p)
-  (let ([fs (for/list ([def (ProgramDefs-def* p)]) 
-					(cons (Def-name def) (length (Def-param* def))))])
-	(letrec ([reveal-functions*
-			   (lambda (expr)
-				 (match expr
-						[(Var v) (let ([f* (assv v fs)]) (if  f* (FunRefArity v (cdr f*)) expr))]
-						[else (map-over-expr reveal-functions* expr)]))])
-	  (match p
-			 [(? Program?) p]
-			 [(? ProgramDefs?) (map-program-def-body reveal-functions* p)]))))
 						
 
 (define (convert-to-closure p)
 
   ;;wrap type info of applied function for later use (limit-functions  for overflowd args)
 ;  (define check-apply-type-class
-;	(class type-check-Rlambda-class
+;	(class type-check-Llambda-class
 ;	  (super-new)
 ;	  (inherit type-check-exp)
 ;	  (inherit check-type-equal?)
@@ -279,6 +236,7 @@
   (define (convert-func-type rt)
 	(match rt
 	  [`(,ps ... -> ,rt*) `(Vector ((Vector _) ,@(map convert-func-type ps) -> ,rt*))] ;;convert function type to closure type
+	  [`(Vector ,ts ...) `(Vector ,@(map convert-func-type ts))]
 	  [else rt]))
 
   (define (convert-param-func-type ps)
@@ -296,6 +254,7 @@
 		(match expr
 		  [(Lambda ps rt body) 
 		   (let* ([lift-fn-name (gensym lam-prefix)]
+				  [arity (length ps)]
 				  [fvs 
 					(for/list ([fv (free-variable expr)])
 					  (HasType (HasType-expr fv) (convert-func-type (HasType-type fv))))]
@@ -316,7 +275,7 @@
 						 body^)])
 
 			 (add-lift-fn lift-fn)
-			 (Closure (length ps) (cons (FunRef lift-fn-name) fvs)))]
+			 (Closure arity (cons (FunRef lift-fn-name arity) fvs)))]
 
 		  [(Apply f-expr args)
 		   (let ([tmp (gensym 'clos_tmp)])
@@ -324,7 +283,7 @@
 				   (Apply (Prim 'vector-ref `(,(Var tmp),(Int 0)))
 						  (cons (Var tmp) (map convert-expr args)))))]
 
-		  [(FunRefArity name arity) (Closure arity (list (FunRef name)))]
+		  [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
 		  [else (map-over-expr convert-expr expr)]))
 
 	  (match-let ([(Def name ps rt info body) def])
@@ -339,7 +298,7 @@
   (let* ([type-check
 		   (lambda (p)
 			 (parameterize ([typed-vars #t]) 
-			   (send (new type-check-Rlambda-class) type-check-program p)))]
+			   (send (new type-check-Llambda-class) type-check-program p)))]
 		 [p^ (type-check p)])
 	(type-check ;;type-check again to "correct" type inconsistency of closure type(aka. vector) and function
 	  (ProgramDefs (ProgramDefs-info p^)
@@ -354,7 +313,7 @@
 
   ;to pack overflowed args to vector need to know their type
   (define expose-apply-type-class
-	(class type-check-Rlambda-class
+	(class type-check-Llambda-class
 		   (super-new)
 		   (inherit type-check-exp)
 		   (inherit check-type-equal?)
@@ -470,7 +429,6 @@
 																				  
 
 			
-;; remove-complex-opera* : R5 -> R5
 (define (remove-complex-opera* p)
   (define (nested-let es rand-acc inner-most)
 		   (if (null? es)
@@ -491,17 +449,15 @@
 
   (define (rco-expr expr)
 	(match expr
-		[(If e1 e2 e3) (If (rco-expr e1) (rco-expr e2) (rco-expr e3))] 
-		[(Let v e b) (Let v (rco-expr e) (rco-expr b))]
-		[(Prim op es) (rco-atm expr)]
-		[(Apply f args) (rco-atm expr)] 
-		[_ expr]))
+		[(? Prim?) (rco-atm expr)]
+		[(? Apply?) (rco-atm expr)] 
+		[else (map-over-expr rco-expr expr)]))
+
   (match p
 		 [(Program info expr) (Program info (rco-expr expr))]
 		 [(? ProgramDefs?) (map-program-def-body rco-expr p)]))
 
 
-;; explicate-control : R4 -> C3
 (define (explicate-control p)
   (define (explicate-control-expr expr-body start-label)
 	(let* ([CFG (list)]
@@ -613,7 +569,7 @@
 		[(Var v) `(,(Instr 'movq (list (Var v) dst)))]
 		[(GlobalValue var) `(,(Instr 'movq (list (Global var) dst)))]
 		[(Void) `(,(Instr 'movq (list (Imm 0) dst)))]
-		[(FunRef f) `(,(Instr 'leaq (list expr dst)))]
+		[(FunRef f arity) `(,(Instr 'leaq (list expr dst)))]
 		[(Call f args) `(,@(push-args args)
 						  ,(IndirectCallq f (length args))
 						  ,(Instr 'movq (list (Reg 'rax) dst)))]
@@ -1133,7 +1089,7 @@
 
 
 ;; print-x86 : x86 -> string 
-(define (print-x86 p)
+#;(define (print-x86 p)
 
   (define (print-CFG fn info CFG)
 	(let* ([num-root-spills (dict-ref info 'num-root-spills 0)]
@@ -1186,7 +1142,7 @@
 				 [(Imm n) (~a "$" n)]
 				 [(Global g) (~a  g "(%rip)")]
 				 [(Deref r o) (format "~a(%~a)" o r)]
-				 [(FunRef label) (~a label "(%rip)")]))])
+				 [(FunRef label arity) (~a label "(%rip)")]))])
 
 	  (letrec ([instr-printer (lambda (instr)
 								(match instr
@@ -1220,18 +1176,4 @@
 ;; prelude-and-conclusion : x86 -> x86
 (define (prelude-and-conclusion p)
   (error "TODO: code goes here (prelude-and-conclusion)"))
-
-;; Define the compiler passes to be used by interp-tests and the grader
-;; Note that your compiler file (the file that defines the passes)
-;; must be named "compiler.rkt"
-(define compiler-passes
-  `( ("uniquify" ,uniquify ,interp-Lvar)
-     ;; Uncomment the following passes as you finish them.
-     ;; ("remove complex opera*" ,remove-complex-opera* ,interp-Lvar)
-     ;; ("explicate control" ,explicate-control ,interp-Cvar)
-     ;; ("instruction selection" ,select-instructions ,interp-x86-0)
-     ;; ("assign homes" ,assign-homes ,interp-x86-0)
-     ;; ("patch instructions" ,patch-instructions ,interp-x86-0)
-     ;; ("prelude-and-conclusion" ,prelude-and-conclusion ,interp-x86-0)
-     ))
 

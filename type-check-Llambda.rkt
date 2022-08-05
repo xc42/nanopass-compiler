@@ -1,10 +1,6 @@
 #lang racket
 (require "utilities.rkt")
-(require "type-check-Cvar.rkt")
-(require "type-check-Cif.rkt")
-(require "type-check-Cvec.rkt")
 (require "type-check-Lfun.rkt")
-(require "type-check-Cfun.rkt")
 (provide type-check-Llambda type-check-Llambda-class typed-vars)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

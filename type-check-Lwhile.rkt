@@ -1,18 +1,8 @@
 #lang racket
-(require graph)
 ;(require "multigraph.rkt")
 (require "utilities.rkt")
-<<<<<<< HEAD:type-check-Rwhile.rkt
-;(require (only-in "any.rkt" compile-Rany))
-(require (only-in "type-check-Rlambda.rkt" typed-vars))
-(require "type-check-Rany.rkt")
-(require "type-check-Cany.rkt")
-(provide type-check-Rwhile type-check-Rwhile-class)
-=======
 (require "type-check-Lif.rkt")
-(require "type-check-Cif.rkt")
 (provide type-check-Lwhile type-check-Lwhile-class)
->>>>>>> upstream/master:type-check-Lwhile.rkt
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;                           while, begin, set!
