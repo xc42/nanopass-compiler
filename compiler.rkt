@@ -1,6 +1,5 @@
 #lang racket
 (require racket/set racket/stream)
-(require racket/fixnum)
 (require "utilities.rkt")
 (require "type-check-Clambda.rkt")
 (require "type-check-Llambda.rkt")
@@ -23,7 +22,7 @@
 (define (fn-start-label fn) (string->symbol (~a fn 'start)))
 
 ;;apply f to expr recursively
-(define (map-over-expr f expr)
+(define (fmap-expr f expr)
 	(match expr
 		   [(Prim op es) (Prim op (map f es))]
 		   [(If e1 e2 e3) (If (f e1) (f e2) (f e3))]
@@ -55,7 +54,7 @@
 		   ;['>= (Prim 'not `(,(Prim '< new-es)))]
 		   ;['>  (If (Prim 'not `(,(Prim '< new-es))) (If (Prim 'eq? new-es) F T) F)]
 		   [other (Prim op new-es)]))]
-	  [else (map-over-expr shrink-exp e)]))
+	  [else (fmap-expr shrink-exp e)]))
   (match p
 	[(Program info body)
 	 (ProgramDefs info `(,(Def 'main '() 'Integer '() (shrink-exp body))))]
@@ -85,7 +84,7 @@
 							 [x^ xs^])
 							(extend-env env^ x x^))])
 			 (Lambda ps^ rt ((uniquify-exp env-ex) body)))]
-		  [else (map-over-expr uniq expr)]))))
+		  [else (fmap-expr uniq expr)]))))
   (match p
 	[(Program info body) (Program info ((uniquify-exp '()) body))]
 	[(ProgramDefs info defs)
@@ -110,7 +109,7 @@
 			   (lambda (expr)
 				 (match expr
 						[(Var v) (let ([f* (assv v fs)]) (if  f* (FunRef v (cdr f*)) expr))]
-						[else (map-over-expr reveal-functions* expr)]))])
+						[else (fmap-expr reveal-functions* expr)]))])
 	  (match p
 			 [(? Program?) p]
 			 [(? ProgramDefs?) (map-program-def-body reveal-functions* p)]))))
@@ -193,7 +192,7 @@
 			[(Lambda ps rt body) 
 			 (let-values ([(ps^ body^) (convert-fun ps (convert-expr body))])
 			   (Lambda ps^ rt body^))]
-			[else (map-over-expr convert-expr expr)]))
+			[else (fmap-expr convert-expr expr)]))
 
 		(define (convert-fun ps body)
 		  (for/foldr ([xs^ '()]
@@ -284,7 +283,7 @@
 						  (cons (Var tmp) (map convert-expr args)))))]
 
 		  [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
-		  [else (map-over-expr convert-expr expr)]))
+		  [else (fmap-expr convert-expr expr)]))
 
 	  (match-let ([(Def name ps rt info body) def])
 		(let ([ps^ (convert-param-func-type
@@ -343,7 +342,7 @@
 					[tail (drop args^ (- arg-limit 1))]
 					[vec-arg (HasType (Prim 'vector tail) `(Vector ,@(map HasType-type tail)))]);;wrap vector with HasType for expose-allocation pass
 			   (Apply f^ (append head `(,vec-arg))))))]
-		[else (map-over-expr limit-apply expr)])) ;;limit-apply
+		[else (fmap-expr limit-apply expr)])) ;;limit-apply
 
 	(define (limit-def^ ps body)
 	  (let* ([head (take ps (- arg-limit 1))]
@@ -384,13 +383,6 @@
 	  [`(,ps ... -> ,ts) 8] ;;function pointer
 	  [`(Vector ,ts ...) (for/fold ([acc 8]) ([t* ts]) (+ acc (calc-bytes-needed t*)))]))
 
-  (define (nested-let-expr vs es body)
-	(if (null? es)
-		body
-		(if (pair? vs)
-			(Let (car vs) (car es) (nested-let-expr (cdr vs) (cdr es) body))
-			(Let vs (car es) (nested-let-expr vs (cdr es) body)))))
-
   (define (do-allocate es bytes alloc-expr)
 	(let* ([var-vec (gensym 'alloc)]
 		   [es^ (let all-assign ([idx 0] [es* es])
@@ -398,13 +390,14 @@
 					'()
 					(cons (Prim 'vector-set! `(,(Var var-vec) ,(Int idx) ,(car es*)))
 						  (all-assign (+ idx 1) (cdr es*)))))]
-		   [assign-body (Let var-vec alloc-expr (nested-let-expr '_ es^ (Var var-vec)))])
-	  (Let '_ 
-		   (If (Prim '< 
+		   [assign-body (Let var-vec alloc-expr (Begin es^ (Var var-vec)))])
+								  
+	  (Begin
+		   `(,(If (Prim '< 
 					 (list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Int bytes)))
 						   (GlobalValue 'fromspace_end)))
 			   (Void)
-			   (Collect bytes))
+			   (Collect bytes)))
 		   assign-body)))
 
 
@@ -416,12 +409,12 @@
 	  [(HasType (Closure arity es) ts)
 	   (let ([bytes (calc-bytes-needed ts)])
 		 (do-allocate (map expose-allocation-expr es) bytes (AllocateClosure bytes ts arity)))]
-	  [else (map-over-expr expose-allocation-expr expr)]))
+	  [else (fmap-expr expose-allocation-expr expr)]))
 
   (define (unwarp-HasType expr)
 	(match expr
 	  [(HasType e t) (unwarp-HasType e)]
-	  [else (map-over-expr unwarp-HasType expr)]))
+	  [else (fmap-expr unwarp-HasType expr)]))
 
   (match p
 	[(Program info e) (Program info (expose-allocation-expr e))]
@@ -451,7 +444,7 @@
 	(match expr
 		[(? Prim?) (rco-atm expr)]
 		[(? Apply?) (rco-atm expr)] 
-		[else (map-over-expr rco-expr expr)]))
+		[else (fmap-expr rco-expr expr)]))
 
   (match p
 		 [(Program info expr) (Program info (rco-expr expr))]
@@ -459,56 +452,92 @@
 
 
 (define (explicate-control p)
+
   (define (explicate-control-expr expr-body start-label)
 	(let* ([CFG (list)]
 		   [add-CFG
 			 (lambda (block [label-str ""])
 			   (if (Goto? block)
-				   block
-				   (let ([label (if (equal? label-str "") (gensym 'block) (string->symbol label-str))])
-					 (set! CFG (cons (cons label block) CFG))
-					 (Goto label))))]
+				 block
+				 (let ([label (cond
+								[(string? label-str) (if (equal? label-str "") 
+													   (gensym 'block) 
+													   (string->symbol label-str))]
+								[else label-str])])
+				   (set! CFG (cons (cons label block) CFG))
+				   (Goto label))))]
 		   [lz-add-CFG
 			 (lambda (block [label-str ""])
 			   (delay (add-CFG block label-str)))])
-	  (letrec
-		([explicate-assign
-		   (lambda (var expr acc)
-			 (match expr
-					[(Let v e body) (explicate-assign v e (explicate-assign var body acc))]
-					[(If pred thn els)
-					 (let ([acc-label (add-CFG acc)])
-					   (explicate-pred pred  
-									   (lz-add-CFG (explicate-assign var thn acc-label))
-									   (lz-add-CFG (explicate-assign var els acc-label))))]
-					[(Apply f args) (Seq (Assign (Var var) (Call f args)) acc)]
-					[other (Seq (Assign (Var var) expr) acc)]))]
 
-		 [explicate-pred
-		   (lambda (pred lz-thn lz-els)
-			 (match pred
-					[(Bool #t)  (force lz-thn)]
-					[(Bool #f)  (force lz-els)]
-					[(Var b) (IfStmt (Prim 'eq? `(,pred ,(Bool #t))) (force lz-thn) (force lz-els))]
-					[(Apply f args) 
-					 (let ([v (gensym 'auto-if-call)]) 
-					   (explicate-assign v (Call f args) (explicate-pred (Var v) lz-thn lz-els)))]
-					[(Prim (or 'eq? '< '<= '> '>=) rands) (IfStmt pred (force lz-thn) (force lz-els))]
-					[(Prim 'not `(,pred*)) (explicate-pred pred* lz-els lz-thn)]
-					[(Let v e body) (explicate-assign v e (explicate-pred body lz-thn lz-els))]
-					[(If pred* thn* els*) 
-					 (explicate-pred pred* 
-									 (lz-add-CFG (explicate-pred thn* lz-thn lz-els)) 
-									 (lz-add-CFG (explicate-pred els* lz-thn lz-els)))]))]
+	  (define (explicate-assign var expr acc)
+		(match expr
+		  [(Let v e body) (explicate-assign v e (explicate-assign var body acc))]
+		  [(If pred thn els)
+		   (let ([acc-label (add-CFG acc)])
+			 (explicate-pred pred  
+							 (lz-add-CFG (explicate-assign var thn acc-label))
+							 (lz-add-CFG (explicate-assign var els acc-label))))]
+		  [(Apply f args) (Seq (Assign (Var var) (Call f args)) acc)]
+		  [(SetBang v e) (explicate-assign v e acc)]
+		  [(Begin es body) (foldr explicate-effect (explicate-assign var body acc) es)]
+		  [(WhileLoop cnd body) (explicate-effect expr (explicate-assign var (Void) acc))]
+		  [other (Seq (Assign (Var var) expr) acc)]))
 
-		 [explicate-tail
-		   (lambda (expr)
-			 (match expr
-					[(Let var e body) (explicate-assign var e (explicate-tail body))]
-					[(If pred thn els) (explicate-pred pred (lz-add-CFG (explicate-tail thn)) (lz-add-CFG (explicate-tail els)))]
-					[(Apply f args) (TailCall f args)]
-					[other (Return expr)]))])
-	  (begin (add-CFG (explicate-tail expr-body) (symbol->string start-label)) CFG))))
+	  (define (explicate-pred pred lz-thn lz-els)
+		(match pred
+		  [(Bool #t)  (force lz-thn)]
+		  [(Bool #f)  (force lz-els)]
+		  [(Var b) (IfStmt (Prim 'eq? `(,pred ,(Bool #t))) (force lz-thn) (force lz-els))]
+		  [(Apply f args) 
+		   (let ([v (gensym 'auto-if-call)]) 
+			 (explicate-assign v (Call f args) (explicate-pred (Var v) lz-thn lz-els)))]
+		  [(Prim (or 'eq? '< '<= '> '>=) rands) (IfStmt pred (force lz-thn) (force lz-els))]
+		  [(Prim 'not `(,pred*)) (explicate-pred pred* lz-els lz-thn)]
+		  [(Let v e body) (explicate-assign v e (explicate-pred body lz-thn lz-els))]
+		  [(Begin es body) (foldr explicate-effect (explicate-pred body lz-thn lz-els) es)]
+		  [(If pred* thn* els*) 
+		   (explicate-pred pred* 
+						   (lz-add-CFG (explicate-pred thn* lz-thn lz-els)) 
+						   (lz-add-CFG (explicate-pred els* lz-thn lz-els)))]))
+
+	  (define (explicate-effect expr acc)
+		(match expr
+		  [(SetBang v e) (explicate-assign v e acc)]
+		  [(Begin es body) (foldr explicate-effect (explicate-effect body acc) es)]
+		  [(WhileLoop cnd body)
+		   (let* ([loop (gensym 'loop)]
+				  [block (explicate-pred cnd (lz-add-CFG (explicate-effect body (Goto loop))) (lz-add-CFG acc))])
+			 (begin
+			   (add-CFG block loop)
+			   block))]
+		  [(Let v e body) (explicate-assign v e (explicate-effect body acc))]
+		  [(If pred thn els)
+		   (let ([acc^ (add-CFG acc)])
+			 (explicate-pred pred 
+							 (lz-add-CFG (explicate-effect thn acc^)) 
+							 (lz-add-CFG (explicate-effect els acc^))))]
+		  [(or (Prim 'vector-set! _) (Prim 'read '()) (? Collect?)) ;;side effect primitives(see utilities.rkt stmt?)
+		   (Seq expr acc)]
+		  [(Apply f args) (Seq (Call f args) acc)]
+		  [_ acc];;can ommit pure expr
+		  ))
+
+
+	  (define (explicate-tail expr)
+		(match expr
+		  [(Let var e body) (explicate-assign var e (explicate-tail body))]
+		  [(If pred thn els) (explicate-pred pred (lz-add-CFG (explicate-tail thn)) (lz-add-CFG (explicate-tail els)))]
+		  [(Apply f args) (TailCall f args)]
+		  [(Begin es body) (foldr explicate-effect (explicate-tail body) es)]
+		  [(WhileLoop cnd body) (explicate-pred cnd 
+												(lz-add-CFG (explicate-effect body (Goto (gensym 'loop))))
+												(lz-add-CFG (Return (Void))))]
+		  [(SetBang v e) (explicate-assign v e (Return (Void)))]
+		  [other (Return expr)]))
+
+	  (begin (add-CFG (explicate-tail expr-body) (symbol->string start-label)) 
+			 CFG)))
 
 	  (match p
 			 [(Program info e) (CProgram info (explicate-control-expr e 'start))]

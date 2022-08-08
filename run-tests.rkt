@@ -125,7 +125,7 @@
 	;;("limit functions" ,limit-functions ,interp-F2) ;; too nasty to write transform at both def & call site and type consistency of func type & closure type (considering a more graceful and efficient argument passing maner later...)
 	("expose allocation" ,expose-allocation ,interp-Llambda-prime)
 	("remove complex opera*" ,remove-complex-opera* ,interp-Llambda-prime)
-	;("explicate control" ,explicate-control ,interp-Clambda)
+	("explicate control" ,explicate-control ,interp-Clambda)
 	;("instruction selection" ,select-instructions ,interp-pseudo-x86-3)
 	;("remove jumps" ,remove-jumps ,interp-pseudo-x86-3)
 	;("allocate register" ,(lambda (p) (allocate-register (build-interference (uncover-live p)))) ,interp-pseudo-x86-3)
