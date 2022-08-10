@@ -127,7 +127,7 @@
 	("remove complex opera*" ,remove-complex-opera* ,interp-Llambda-prime)
 	("explicate control" ,explicate-control ,interp-Clambda)
 	("instruction selection" ,select-instructions ,interp-pseudo-x86-3)
-	;("remove jumps" ,remove-jumps ,interp-pseudo-x86-3)
+	("remove jumps" ,remove-jumps ,interp-pseudo-x86-3)
 	;("allocate register" ,(lambda (p) (allocate-register (build-interference (uncover-live p)))) ,interp-pseudo-x86-3)
 	;("patch instructions",patch-instructions ,interp-x86-3) 
 	;("print x86" ,print-x86 #f)

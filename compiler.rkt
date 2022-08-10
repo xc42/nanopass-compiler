@@ -1,11 +1,12 @@
 #lang racket
-(require racket/set racket/stream)
+(require racket/set racket/stream racket/promise)
+(require data/queue)
+(require graph)
 (require "utilities.rkt")
 (require "type-check-Clambda.rkt")
 (require "type-check-Llambda.rkt")
 (require (prefix-in runtime-config:: "runtime-config.rkt"))
-(require graph)
-(require racket/promise)
+
 (provide (all-defined-out))
 
 
@@ -543,7 +544,7 @@
 			 CFG)))
 
 	  (match p
-			 [(Program info e) (CProgram info (explicate-control-expr e 'start))]
+			 ;[(Program info e) (CProgram info (explicate-control-expr e 'start))]
 			 [(ProgramDefs info defs) 
 			  (ProgramDefs info (for/list ([def (in-list defs)])
 										  (match-let ([(Def fn ps rt info body) def])
@@ -709,57 +710,50 @@
 		(Def fn ps rt info^ CFG^))))
 
   (match (send (new type-check-Clambda-class) type-check-program p)
-	[(CProgram info CFG) 
-	 (X86Program (cons `(num-root-spills . ,(num-root-spills info)) info)
-				 (for/list ([bb CFG]) 
-				   (cons (car bb) 
-						 (Block '() (trans-tail (cdr bb))))))]
 	[(ProgramDefs info defs) (ProgramDefs info (map trans-def defs))]))
 
 
 (define (remove-jumps p)
   (define (occur-once xs)
 	(if (null? xs)
-		(set)
-		(let ([x (car xs)]
-			  [once (occur-once (cdr xs))])
-		  (if (set-member? once x)
-			  (set-remove once x)
-			  (set-add once x)))))
+	  (set)
+	  (let ([x (car xs)]
+			[once (occur-once (cdr xs))])
+		(if (set-member? once x)
+		  (set-remove once x)
+		  (set-add once x)))))
   (define (remove-for-lab-blks lab-blks)
 	(let* ([scan-block
 			 (lambda (lab-blk)
 			   (for/fold ([jpif-ref (set)]
 						  [jp-ref '()])
-						 ([stmt (Block-instr* (cdr lab-blk))] #:when (or (JmpIf? stmt) (Jmp? stmt)))
-						 (if (Jmp? stmt)
-							 (values jpif-ref (cons (Jmp-target stmt) jp-ref))
-							 (values (set-add jpif-ref (JmpIf-target stmt)) jp-ref))))]
+				 ([stmt (Block-instr* (cdr lab-blk))] #:when (or (JmpIf? stmt) (Jmp? stmt)))
+				 (if (Jmp? stmt)
+				   (values jpif-ref (cons (Jmp-target stmt) jp-ref))
+				   (values (set-add jpif-ref (JmpIf-target stmt)) jp-ref))))]
 		   [tail-labels
 			 (for/fold ([acc-jpif-ref (set)]
 						[acc-jp-ref '()]
 						#:result (set-subtract (occur-once acc-jp-ref) acc-jpif-ref))
-					   ([lab-blk lab-blks])
-					   (let-values ([(jpif-ref jp-ref) (scan-block lab-blk)])
-						 (values (set-union jpif-ref acc-jpif-ref) (append jp-ref acc-jp-ref))))])
+			   ([lab-blk lab-blks])
+			   (let-values ([(jpif-ref jp-ref) (scan-block lab-blk)])
+				 (values (set-union jpif-ref acc-jpif-ref) (append jp-ref acc-jp-ref))))])
 	  (letrec ([trans-stmts 
 				 (lambda (stmts)
 				   (foldr 
 					 (lambda (instr acc)
 					   (match instr
-							  [(Jmp label) (if (set-member? tail-labels label)
-											   (append (trans-stmts (Block-instr* (dict-ref lab-blks label))) acc)
-											   (cons instr acc))]
-							  [_ (cons instr acc)]))
+						 [(Jmp label) (if (set-member? tail-labels label)
+										(append (trans-stmts (Block-instr* (dict-ref lab-blks label))) acc)
+										(cons instr acc))]
+						 [_ (cons instr acc)]))
 					 '()
 					 stmts))])
 		(for/list ([lab-blk lab-blks]
 				   #:unless (set-member? tail-labels (car lab-blk)))
-				  (match-let ([(Block binfo stmts) (cdr lab-blk)])
-							 (cons (car lab-blk) (Block binfo (trans-stmts stmts))))))))
-  (match p
-		 [(X86Program info lab-blks) (X86Program info (remove-for-lab-blks lab-blks))]
-		 [(? ProgramDefs?) (map-program-def-body remove-for-lab-blks p)]))
+		  (match-let ([(Block binfo stmts) (cdr lab-blk)])
+			(cons (car lab-blk) (Block binfo (trans-stmts stmts))))))))
+  (map-program-def-body remove-for-lab-blks p))
 
 					 
 
@@ -824,7 +818,7 @@
 			  (cons obj (get-infer-objs (cdr rands)))
 			  (get-infer-objs (cdr rands)))))))
 
-(define (get-instr-RW-set instr)
+(define (get-Gen-Kill instr)
   (let ([rw
 		  (match instr
 				 [(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
@@ -844,53 +838,98 @@
 				  (cons (cons f (for/list ([x (vector-take arg-registers arity)]) (Reg x)))
 						'())] 
 				 
-				 [_ (error (format "unhandled instr ~a in get-instr-RW-set" instr))])])
+				 [_ (error (format "unhandled instr ~a in get-Gen-Kill" instr))])])
 	  (cons (apply set (get-infer-objs (car rw))) 
 			(apply set (get-infer-objs (cdr rw))))))
 				
 
-;two ways:  1. calculate CFG and using tsort to get eval order
-;			2. using lazy eval
+
+(define (analyze-dataflow-backward CFG bottom join transfer)
+  (let* ([lab-lives (make-hasheq)]
+		 [In (make-hasheq)]
+		 [Out (make-hasheq)]
+		 [worklist (make-queue)])
+
+
+	;;update one BB
+	(define (update lab)
+	  (let* ([outs (dict-ref Out lab '())]
+			 [tail (for/fold ([acc bottom])
+					 ([out outs])
+					 (join (dict-ref lab-lives out) acc))]
+			 [cur (dict-ref lab-lives lab)]
+			 [next (transfer (cons lab cur) tail)])
+		(cond 
+		  [(equal? cur next) '()]
+		  [else (begin 
+				  (dict-set! lab-lives lab next)
+				  (dict-ref In lab '()))])))
+
+	(begin 
+	  ;;init hashes
+	  (for ([kv CFG])
+		(let ([lab (car kv)]
+			  [blk (cdr kv)])
+		  ;;init bottom lab-lives
+		  (dict-set! lab-lives lab bottom)
+		  ;;init worklist queue
+		  (enqueue! worklist lab)
+		  ;;init In and Out
+		  (for ([instr (Block-instr* blk)])
+			(match instr
+			  [(or (JmpIf _ label) (Jmp label))
+			   (dict-set! Out lab (cons label (dict-ref Out lab '())))
+			   (dict-set! In label (cons lab (dict-ref In label '())))]
+			  [_ (void)]))
+		  ))
+
+	  ;;iterate until no more work to do
+	  (let iter ()
+		(cond 
+		  [(queue-empty? worklist) lab-lives]
+		  [else
+			(let ([new-work (update (dequeue! worklist))])
+			  (for ([w new-work]) (enqueue! worklist w))
+			  (iter))])))))
+
+
+
 (define (uncover-live p)
-  (define (uncover-CFG lab-blks)
-	(letrec ([uncover-one-instr
-			   (lambda (instr acc-live-set)
-				 (let ([live-after (car acc-live-set)])
-				   (match instr
-						  [(Instr 'cmpq rands) 
-						   (for/fold ([lives (set-union live-after (cadr acc-live-set))]) ;;here assume cmp followed by JmpIf and Jmp
-									 ([x (car (get-instr-RW-set instr))])
-									 (set-add lives x))]
-						  [(Jmp label) (car (force (dict-ref lazy-lab-live-sets label)))]
-						  [(JmpIf c label) (car (force (dict-ref lazy-lab-live-sets label)))]
-						  [(Retq) live-after] ;;TODO
-						  [_ (let ([rw (get-instr-RW-set instr)])
-							   (set-union (set-subtract live-after (cdr rw)) (car rw)))] 
-						  )))]
-			 [uncover-block	
-			   (lambda (stmts) 
-				 (foldr (lambda (instr acc-live-set) (cons (uncover-one-instr instr acc-live-set) acc-live-set))
-						`(,(set))
-						stmts))]
-			 [lazy-lab-live-sets
-			   (map 
-				 (lambda (lab-blk)
-				   (let ([lab (car lab-blk)] 
-						 [blk (cdr lab-blk)])
-					 (cons lab (delay (uncover-block (Block-instr* blk))))))
-				 lab-blks)])
-	  (map 
-		(lambda (lab-blk) 
-		  (match-let ([(cons label (Block info stmts)) lab-blk])
-					 (cons label 
-						   (Block 
-							 (cons (cons 'live-set (force (dict-ref lazy-lab-live-sets label))) 
-										info) 
-							 stmts))))
-		lab-blks)))
-  (match p
-		 [(X86Program info lab-blks) (X86Program info (uncover-CFG lab-blks))]
-		 [(? ProgramDefs?) (map-program-def-body uncover-CFG p)]))
+
+  (define (uncover-lives CFG)
+	(define lab-live-set (make-hasheq))
+	(define (uncover-one-instr instr live-after)
+	  (match instr
+		[(or (? Jmp?) (? JmpIf?) (? Retq?)) live-after]
+		[_ (let ([rw (get-Gen-Kill instr)])
+			 ((live-after . set-subtract . (cdr rw)) . set-union . (car rw)))]))
+
+	(define (transfer cur tail)
+	  (let* ([lab (car cur)]
+			 [blk (dict-ref CFG lab)]
+			 [last-jmp? (Jmp? (last (Block-instr* blk)))]
+			 [acc-lives
+			   (for/fold ([acc (if last-jmp? (list tail) (list (set)))])
+				 ([instr (Block-instr* blk)])
+				 (cond
+				   [(and (not last-jmp?) (JmpIf? instr)) (cons (set-union tail (car acc)) acc)]
+				   [else (cons (uncover-one-instr instr (car acc)) acc)]))])
+		(begin
+		  (dict-set! lab-live-set lab acc-lives)
+		  (car acc-lives))))
+
+	(begin 
+	  (analyze-dataflow-backward CFG (set) set-union transfer)
+
+	  (for/list ([kv CFG])
+		(let* ([lab (car kv)]
+			   [blk (cdr kv)]
+			   [live-set (dict-ref lab-live-set lab)])
+		  (cons lab
+				(Block (dict-set (Block-info blk) lab live-set) 
+					   (Block-instr* blk))))))) ;;uncover-lives
+
+	(map-program-def-body uncover-CFG p))
 
 
 (define (build-interference p)
@@ -939,7 +978,7 @@
 																caller-save)])
 														(unless (equal? x d) (add-edge! g x (Reg d)))))))]
 
-								[_ (let ([w (cdr (get-instr-RW-set instr))])
+								[_ (let ([w (cdr (get-Gen-Kill instr))])
 									 (set-for-each lives 
 												   (lambda (x)
 													 (for ([d w] #:unless (equal? x d))
