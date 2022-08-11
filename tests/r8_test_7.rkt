@@ -1,4 +1,4 @@
-(define (no-use) : Void
+(define (nouse) : Void
   (let ([i 0])
 	(let ([ans 
 			(while (< i 10)
@@ -7,5 +7,5 @@
 
 
 (begin
-  (no-use)
+  (nouse)
   23)

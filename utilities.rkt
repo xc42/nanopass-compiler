@@ -71,7 +71,7 @@ Changelog:
          registers align byte-reg->full-reg print-by-type strip-has-type
          make-lets dict-set-all dict-remove-all goto-label get-basic-blocks 
          symbol-append any-tag parse-program vector->set atm? fst
-         print-x86 print-x86-class
+         ;print-x86 print-x86-class
          
          (contract-out [struct Prim ((op symbol?) (arg* exp-list?))])
          (contract-out [struct Var ((name symbol?))])
@@ -2107,13 +2107,13 @@ Changelog:
                                 (loop (cdr passes) new-p)
                                 ]))])
               (cond [(string? x86)
-                     (error "error, compiler should produce x86 AST, not a string")
+                     ;(error "error, compiler should produce x86 AST, not a string")
                      (write-string x86 out-file)
                      (newline out-file)
                      (flush-output out-file)
                      #t]
                     [else
-                     #;(error "compiler did not produce x86 output")
+                     (error "compiler did not produce x86 output")
                      (define x86-str (print-x86 x86))
                      (write-string x86-str out-file)
                      (newline out-file)
@@ -2243,7 +2243,7 @@ Changelog:
               (test-case "typecheck" (check-false typechecks "Expected expression to fail typechecking"))
 	      (if (not typechecks) (fail "Expected expression to typecheck")
 		  (test-case "code generation"
-			     (let ([gcc-output (system (format "gcc -g -march=x86-64 -std=c99 runtime.o ./tests/~a.s -o ./tests/~a.out" test-name test-name))])
+			     (let ([gcc-output (system (format "g++ -g -march=x86-64 runtime.o ./tests/~a.s -o ./tests/~a.out" test-name test-name))])
 			       (if (not gcc-output) (fail "Failed during assembly")
 				   (let ([input (if (file-exists? (format "./tests/~a.in" test-name))
 						    (format " < ./tests/~a.in" test-name)

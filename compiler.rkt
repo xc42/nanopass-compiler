@@ -1045,34 +1045,34 @@
 	   [var-map
 		 (let scan-var ([loc-ts (dict-ref info 'locals-types '())] [spilled 0] [rootst-spilled 0])
 		   (if (null? loc-ts)
-			   (begin (set-box! spilled-bx spilled) (set-box! rootst-spilled-bx rootst-spilled) '())
-			   (let* ([var (Var (caar loc-ts))]
-					  [ts (cdar loc-ts)]
-					  [is-vec-type  (and (pair? ts) (eq? (car ts) 'Vector))])
-				 (if (hash-has-key? color-map var)
-					 (let ([reg-idx (hash-ref color-map var)])
-					   (if (or (< reg-idx 0) (>= reg-idx limit-reg))
-						   (if  is-vec-type
-								(cons (cons var (Deref rootstack-reg (* -8 (+ 1 rootst-spilled)))) (scan-var (cdr loc-ts) spilled (+ rootst-spilled 1))) ; spill to rootstack for gc
-								(cons (cons var (Deref 'rbp (* -8 (+ 1 spilled)))) (scan-var (cdr loc-ts) (+ spilled 1) rootst-spilled)))
-						   (cons (cons var (Reg (vector-ref general-registers reg-idx))) (scan-var (cdr loc-ts) spilled rootst-spilled))))
-					 (cons (cons var var) (scan-var (cdr loc-ts) spilled))))))]
+			 (begin (set-box! spilled-bx spilled) (set-box! rootst-spilled-bx rootst-spilled) '())
+			 (let* ([var (Var (caar loc-ts))]
+					[ts (cdar loc-ts)]
+					[is-vec-type  (and (pair? ts) (eq? (car ts) 'Vector))])
+			   (if (hash-has-key? color-map var)
+				 (let ([reg-idx (hash-ref color-map var)])
+				   (if (or (< reg-idx 0) (>= reg-idx limit-reg))
+					 (if  is-vec-type
+					   (cons (cons var (Deref rootstack-reg (* -8 (+ 1 rootst-spilled)))) (scan-var (cdr loc-ts) spilled (+ rootst-spilled 1))) ; spill to rootstack for gc
+					   (cons (cons var (Deref 'rbp (* -8 (+ 1 spilled)))) (scan-var (cdr loc-ts) (+ spilled 1) rootst-spilled)))
+					 (cons (cons var (Reg (vector-ref general-registers reg-idx))) (scan-var (cdr loc-ts) spilled rootst-spilled))))
+				 (cons (cons var var) (scan-var (cdr loc-ts) spilled))))))]
 
 	   [used-callee-regs 
 		 (set-union
 		   (for/set ([kv (in-list var-map)] #:when (set-member? callee-save (cdr kv))) (cdr kv))
 		   (if (or (= 0 (unbox rootst-spilled-bx)) (not (set-member? callee-save rootstack-reg)))
-			   (set)
-			   (set (Reg rootstack-reg))))]
+			 (set)
+			 (set (Reg rootstack-reg))))]
 
 	   [replace-instr 
 		 (lambda (instr)
 		   (let ([replace-rand (lambda (rand) (dict-ref var-map rand rand))])
 			 (match instr
-					[(Instr op args) (Instr op (map replace-rand args))]
-					[(IndirectCallq f arity) (IndirectCallq (replace-rand f) arity)]
-					[(TailJmp f arity) (TailJmp (replace-rand f) arity)]
-					[_ instr])))]
+			   [(Instr op args) (Instr op (map replace-rand args))]
+			   [(IndirectCallq f arity) (IndirectCallq (replace-rand f) arity)]
+			   [(TailJmp f arity) (TailJmp (replace-rand f) arity)]
+			   [_ instr])))]
 
 	   [conclusion-label (string->symbol (~a start-label 'conclusion))]
 	   [info^ (append 
@@ -1085,27 +1085,23 @@
 						   [blk (cdr lab-blk)]
 						   [stmts* (map replace-instr (Block-instr* blk))]
 						   [is-tail (let find ([instrs stmts*])
-											   (cond
-												 [(null? instrs) #t]
-												 [(or (TailJmp? (car instrs)) (Jmp? (car instrs))) #f]
-												 [else (find (cdr instrs))]))]
+									  (cond
+										[(null? instrs) #t]
+										[(or (TailJmp? (car instrs)) (Jmp? (car instrs))) #f]
+										[else (find (cdr instrs))]))]
 						   [stmts^ (if is-tail
 									 (append stmts* `(,(Jmp conclusion-label)))
 									 stmts*)])
 					  (cons lab (Block (Block-info blk) stmts^))))])
 
-	(values info^ lab-blks^)))
+	  (values info^ lab-blks^)))
 
   (define (allocate-for-def def)
 	(match-let ([(Def fn ps rt info CFG) def])
-			   (let-values ([(info* CFG*) (do-allocate fn (fn-start-label fn) info CFG )])
-				 (Def fn ps rt info* CFG*))))
+	  (let-values ([(info* CFG*) (do-allocate fn (fn-start-label fn) info CFG )])
+		(Def fn ps rt info* CFG*))))
 
-  (match p
-		 [(X86Program info lab-blks)
-		  (let-values ([(info* lab-blks*) (do-allocate 'main  'start info lab-blks)])
-			(X86Program info* lab-blks*))]
-		 [(? ProgramDefs?) (map-program-def allocate-for-def p)]))
+  (map-program-def allocate-for-def p))
 									
 
 ;; patch-instructions : psuedo-x86 -> x86
@@ -1153,7 +1149,7 @@
 
 
 ;; print-x86 : x86 -> string 
-#;(define (print-x86 p)
+(define (print-x86 p)
 
   (define (print-CFG fn info CFG)
 	(let* ([num-root-spills (dict-ref info 'num-root-spills 0)]
@@ -1237,7 +1233,3 @@
 		  (string-join
 			(for/list ([def defs]) (print-CFG (Def-name def) (Def-info def) (Def-body def)))
 			"\n\n")]))
-;; prelude-and-conclusion : x86 -> x86
-(define (prelude-and-conclusion p)
-  (error "TODO: code goes here (prelude-and-conclusion)"))
-
