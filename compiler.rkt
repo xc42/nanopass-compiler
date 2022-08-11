@@ -896,7 +896,7 @@
 
 (define (uncover-live p)
 
-  (define (uncover-lives CFG)
+  (define (uncover CFG)
 	(define lab-live-set (make-hasheq))
 	(define (uncover-one-instr instr live-after)
 	  (match instr
@@ -909,7 +909,7 @@
 			 [blk (dict-ref CFG lab)]
 			 [last-jmp? (Jmp? (last (Block-instr* blk)))]
 			 [acc-lives
-			   (for/fold ([acc (if last-jmp? (list tail) (list (set)))])
+			   (for/foldr ([acc (if last-jmp? (list tail) (list (set)))])
 				 ([instr (Block-instr* blk)])
 				 (cond
 				   [(and (not last-jmp?) (JmpIf? instr)) (cons (set-union tail (car acc)) acc)]
@@ -926,10 +926,10 @@
 			   [blk (cdr kv)]
 			   [live-set (dict-ref lab-live-set lab)])
 		  (cons lab
-				(Block (dict-set (Block-info blk) lab live-set) 
-					   (Block-instr* blk))))))) ;;uncover-lives
+				(Block (dict-set (Block-info blk) 'live-set live-set) 
+					   (Block-instr* blk))))))) ;;uncover
 
-	(map-program-def-body uncover-CFG p))
+	(map-program-def-body uncover p))
 
 
 (define (build-interference p)
@@ -940,57 +940,60 @@
 			   (lambda (v g) (add-vertex! g (Var v)) g) 
 			   (undirected-graph '()) 
 			   (map car loc-ts))])
-	  (letrec 
-		([from-label
-		   (lambda (label)
-			 (match-let* ([(Block binfo instrs) (dict-ref lab-blks label)]
+	  (define (from-label start)
+		(let ([visited (mutable-seteq)])
+		  (define (recur label)
+			(set-add! visited label)
+			(match-let* ([(Block binfo instrs) (dict-ref lab-blks label)]
 						 [live-sets (dict-ref binfo 'live-set)]
 						 [g infer-G])
-					(for ([instr instrs]
-						  [lives (cdr live-sets)])
-						 (match instr
+			  (for ([instr instrs]
+					[lives (cdr live-sets)])
+				(match instr
+				  [(Instr 'movq `(,s ,d)) 
+				   (let ([s* (get-infer-objs `(,s))]
+						 [d* (get-infer-objs `(,d))])
+					 (set-for-each lives 
+								   (lambda (x) 
+									 (unless (or (and (not (null? s*)) (equal? x (car s*)))
+												 (and (not (null? d*)) (equal? x (car d*)))) 
+									   (add-edge! g x (car d*))))))]
 
-								[(Instr 'movq `(,s ,d)) 
-								 (let ([s* (get-infer-objs `(,s))]
-									   [d* (get-infer-objs `(,d))])
-								   (set-for-each lives 
-												 (lambda (x) 
-												   (unless (or (and (not (null? s*)) (equal? x (car s*)))
-															   (and (not (null? d*)) (equal? x (car d*)))) 
-													 (add-edge! g x (car d*))))))]
+				  [(Instr 'movzbq `(,(ByteReg br) ,d))
+				   (let ([fr (Reg (byte-reg->full-reg br))]
+						 [d* (get-infer-objs `(,d))])
+					 (set-for-each lives (lambda (x) (unless (or (equal? x fr) (equal? x (car d*))) (add-edge! g x (car d*))))))]
 
-								[(Instr 'movzbq `(,(ByteReg br) ,d))
-								 (let ([fr (Reg (byte-reg->full-reg br))]
-									   [d* (get-infer-objs `(,d))])
-								   (set-for-each lives (lambda (x) (unless (or (equal? x fr) (equal? x (car d*))) (add-edge! g x (car d*))))))]
+				  [(JmpIf f lab) (unless (set-member? visited lab) (from-label lab))]
+				  [(Jmp lab) (unless (set-member? visited lab) (from-label lab))]
 
-								[(JmpIf f lab) (from-label lab)]
-								[(Jmp lab) (from-label lab)]
+				  [(or (Callq f _) (IndirectCallq f _))
+				   (set-for-each lives 
+								 (lambda (x)
+								   (let ([vec?
+										   (and (Var? x) 
+												(eq? 'Vector (dict-ref  loc-ts (Var-name x) #f)))])
+									 (for ([d (if (and vec? (or (eq? f 'collect) (IndirectCallq? instr)))
+												(set-union caller-save callee-save)
+												caller-save)])
+									   (unless (equal? x d) (add-edge! g x (Reg d)))))))]
 
-								[(or (Callq f _) (IndirectCallq f _))
-								 (set-for-each lives 
-											   (lambda (x)
-												 (let ([vec?
-														 (and (Var? x) 
-															  (eq? 'Vector (dict-ref  loc-ts (Var-name x) #f)))])
-												   (for ([d (if (and vec? (or (eq? f 'collect) (IndirectCallq? instr)))
-																(set-union caller-save callee-save)
-																caller-save)])
-														(unless (equal? x d) (add-edge! g x (Reg d)))))))]
-
-								[_ (let ([w (cdr (get-Gen-Kill instr))])
-									 (set-for-each lives 
-												   (lambda (x)
-													 (for ([d w] #:unless (equal? x d))
-														  (add-edge! g x d)))))]))
-					g ))]) ;remember to return g
-			  (from-label start))))
+				  [_ (let ([w (cdr (get-Gen-Kill instr))])
+					   (set-for-each lives 
+									 (lambda (x)
+									   (for ([d w] #:unless (equal? x d))
+										 (add-edge! g x d)))))]))
+			g) ;;return interference graph
+			) ;;recur end
+		  (recur start)))
+	  (from-label start)))
 
   (define (build-from-def def)
 	(match-let ([(Def fn ps rt info CFG) def])
-			   (Def fn ps rt (cons `(conflicts . ,(build-from info CFG (fn-start-label fn))) info) CFG)))
+	  (let ([info^ (cons `(conflicts . ,(build-from info CFG (fn-start-label fn))) info)])
+			   (Def fn ps rt info^ CFG))))
   (match p
-		 [(X86Program info CFG) (X86Program (cons `(conflicts . ,(build-from info CFG 'start)) info) CFG)]
+		 ;[(X86Program info CFG) (X86Program (cons `(conflicts . ,(build-from info CFG 'start)) info) CFG)]
 		 [(? ProgramDefs?) (map-program-def build-from-def p)]))
 
 
