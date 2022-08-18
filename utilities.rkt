@@ -131,6 +131,7 @@ Changelog:
          (contract-out [struct Imm ((value integer?))]) ;; allow 64-bit
          (contract-out [struct Reg ((name symbol?))])
          (contract-out [struct Deref ((reg symbol?) (offset fixnum?))])
+         (contract-out [struct DerefEx ((base Reg?) (var (or/c Var? Reg? Deref?)) (stride fixnum?) (offset fixnum?))])
          (contract-out [struct Instr ((name symbol?) (arg* arg-list?))])
          (contract-out [struct Callq ((target symbol?) (arity fixnum?))])
          (contract-out [struct IndirectCallq ((target arg?) (arity fixnum?))])
@@ -1129,19 +1130,27 @@ Changelog:
           )
         ]))])
 
-(struct AllocateHom (amount type) #:transparent #:property prop:custom-print-quotable 'never
+(struct AllocateHom (len amount type) #:transparent #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
-  [(define (write-proc ast port mode)
+  [#;(define (write-proc ast port mode)
      (match ast
-       [(AllocateHom amount type)
+       [(AllocateHom len amount type)
         (let-values ([(line col pos) (port-next-location port)])
           (write-string "(allocate-hom " port)
-          (write amount port)
+          (write (Var-name len) port)
+          (write-string " " port)
+          (write (Var-name amount) port)
           (write-string " " port)
           (write-type type port)
           (write-string ")" port)
           )
-        ]))])
+        ]))
+   (define write-proc
+   (make-constructor-style-printer
+	 (lambda (obj) 'AllocateHom)
+	 (lambda (obj) (struct->list obj))))]
+)
+   
 
 (struct AllocateClosure (amount type arity) #:transparent #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
@@ -1256,6 +1265,25 @@ Changelog:
                [(eq? (AST-output-syntax) 'abstract-syntax)
                 (csp ast port mode)]
                ))))])
+
+(struct DerefEx (base var stride offset) #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+				  (lambda (obj) 'DerefEx)
+				  (lambda (obj) (struct->list obj)))])
+	   (lambda (ast port mode)
+		 (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+				(match ast
+				  [(DerefEx base var stride offset)
+				   (write offset port)
+				   (write-string "(" port)
+				   (write-string ")" port)
+				   ])]
+			   [(eq? (AST-output-syntax) 'abstract-syntax)
+				(csp ast port mode)]
+			   ))))]
+)
                
 (struct Instr (name arg*) #:transparent #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
@@ -1506,7 +1534,7 @@ Changelog:
     [(Apply e es) #t]
     [(GlobalValue n) #t]
     [(Allocate n t) #t]
-    [(AllocateHom n t) #t]
+    [(? AllocateHom?) #t]
     [(AllocateProxy t) #t]
     [(AllocateClosure n t a) #t]
     [(If cnd thn els) #t]
@@ -1602,6 +1630,7 @@ Changelog:
     [(Var x) #t]
     [(Reg r) #t]
     [(Deref r n) #t]
+	[(? DerefEx?) #t]
     [(ByteReg r) #t]
     [(? symbol?) #t] ;; for condition code in set instruction
     [(Global name) #t]

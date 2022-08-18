@@ -1,7 +1,7 @@
 #lang racket
 (require racket/fixnum)
 (require "utilities.rkt")
-(require "interp-Lwhile.rkt")
+(require "interp-Lvec.rkt")
 (provide interp-Lvecof interp-Lvecof-class)
 
 ;; Note to maintainers of this code:
@@ -9,7 +9,7 @@
 ;;   kept in sync with this code.
 
 (define interp-Lvecof-class
-  (class interp-Lwhile-class
+  (class interp-Lvec-class
     (super-new)
 
     (define/override (interp-op op)

@@ -56,10 +56,12 @@
               (values (Prim 'vectorof-length (list e1^))  'Integer)]
              [else ((super type-check-exp env) e)])]
 
-          [(AllocateHom e1 t)
+          [(AllocateHom e1 e2 t)
            (define-values (e1^ t1) (recur e1))
+           (define-values (e2^ t2) (recur e2))
            (check-type-equal? t1 'Integer e)
-           (values (AllocateHom e1^ t) t)]
+           (check-type-equal? t2 'Integer e)
+           (values (AllocateHom e1^ e2^ t) t)]
           
           [else ((super type-check-exp env) e)])))
     ))

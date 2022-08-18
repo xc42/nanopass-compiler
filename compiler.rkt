@@ -237,6 +237,7 @@
 	(match rt
 	  [`(,ps ... -> ,rt*) `(Vector ((Vector _) ,@(map convert-func-type ps) -> ,rt*))] ;;convert function type to closure type
 	  [`(Vector ,ts ...) `(Vector ,@(map convert-func-type ts))]
+	  [`(Vectorof ,t) `(Vectorof ,(convert-func-type t))]
 	  [else rt]))
 
   (define (convert-param-func-type ps)
@@ -382,34 +383,70 @@
 	(match t
 	  ['Integer 8]
 	  [`(,ps ... -> ,ts) 8] ;;function pointer
+	  [`(Vectorof ,_) 8] ;;only pointer	
 	  [`(Vector ,ts ...) (for/fold ([acc 8]) ([t* ts]) (+ acc (calc-bytes-needed t*)))]))
 
-  (define (do-allocate es bytes alloc-expr)
+  (define (allocate-tuple es bytes alloc-expr)
 	(let* ([var-vec (gensym 'alloc)]
 		   [es^ (let all-assign ([idx 0] [es* es])
 				  (if (null? es*)
 					'()
 					(cons (Prim 'vector-set! `(,(Var var-vec) ,(Int idx) ,(car es*)))
 						  (all-assign (+ idx 1) (cdr es*)))))]
-		   [assign-body (Let var-vec alloc-expr (Begin es^ (Var var-vec)))])
+		   [assign-body (Let var-vec alloc-expr (Begin es^ (Var var-vec)))]
+		   [gc-check 
+			 (If (Prim '< 
+						  (list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Int bytes)))
+								(GlobalValue 'fromspace_end)))
+					(Void)
+					(Collect (Int bytes)))])
 								  
-	  (Begin
-		   `(,(If (Prim '< 
-					 (list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Int bytes)))
-						   (GlobalValue 'fromspace_end)))
-			   (Void)
-			   (Collect bytes)))
-		   assign-body)))
+	  (Begin (list gc-check) assign-body)))
+
+  (define (allocate-arr len-expr val-expr ts)
+	(let* ([bytes-var (gensym 'arr-bytes)]
+		   [arr-var (gensym 'arr)]
+		   [val-var (gensym 'arr-val)]
+		   [idx-var (gensym 'arr-init-idx)]
+		   [len-var (gensym 'arr-init-len)]
+		   [usize (match ts
+				  ['(Vectorof Integer) 8]
+				  [`(Vectorof ,_) 8] ;pointer size
+				  )]
+		   [bytes-expr (Prim '+ (list (Int 8)
+									  (Prim '* `(,(Int usize) ,(Var len-var)))))]
+		   [gc-check
+			 (If (Prim '< (list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Var bytes-var)))
+								(GlobalValue 'fromspace_end)))
+				 (Void)
+				 (Collect (Var bytes-var)))]
+		   [init-arr
+			 (Let val-var val-expr
+				  (Let arr-var (AllocateHom (Var len-var) (Var bytes-var) ts)
+					   (Let idx-var (Int 0)
+							(Begin
+							  (list
+								(WhileLoop (Prim '< `(,(Var idx-var) ,(Var len-var)))
+										   (Begin
+											 (list (Prim 'vectorof-set! `(,(Var arr-var) ,(Var idx-var) ,(Var val-var))))
+											 (SetBang idx-var (Prim '+ `(,(Var idx-var) ,(Int 1)))))))
+							  (Var arr-var)))))])
+
+	  (Let len-var len-expr
+		   (Let bytes-var bytes-expr
+				(Begin (list gc-check) init-arr)))))
 
 
   (define (expose-allocation-expr expr)
 	(match expr
 	  [(HasType (Prim 'vector es) ts) 
 	   (let ([bytes (calc-bytes-needed ts)])
-		 (do-allocate (map expose-allocation-expr es) bytes (Allocate bytes ts)))]
+		 (allocate-tuple (map expose-allocation-expr es) bytes (Allocate bytes ts)))]
 	  [(HasType (Closure arity es) ts)
 	   (let ([bytes (calc-bytes-needed ts)])
-		 (do-allocate (map expose-allocation-expr es) bytes (AllocateClosure bytes ts arity)))]
+		 (allocate-tuple (map expose-allocation-expr es) bytes (AllocateClosure bytes ts arity)))]
+	  [(HasType (Prim 'make-vector `(,len ,val)) ts) 
+	   (allocate-arr len (expose-allocation-expr val) ts)]
 	  [else (fmap-expr expose-allocation-expr expr)]))
 
   (define (unwarp-HasType expr)
@@ -561,25 +598,13 @@
 	(match e
 	  [(Int n) (Imm n)]
 	  [(Bool b) (Imm (if b 1 0))]
+	  [(? number?) (Imm e)]
 	  [else e]))
 
   (define (get-const-val r2)
 	(match r2
 	  [(Bool b) b]
 	  [(Int n) n]))
-
-  (define (get-vec-tag vec-ts)
-	(let ([mask (let pointer-mask ([ts* (cdr vec-ts)])
-				  (cond
-					[(null? ts*) 0]
-					[else (bitwise-ior (arithmetic-shift (pointer-mask (cdr ts*)) 1) 
-								 (match (car ts*)
-								   [`(Vector ,t ...) 1]
-								   [else 0]))]))]
-		  [len (length (cdr vec-ts))]
-		  [<< arithmetic-shift]
-		  [|| bitwise-ior])
-	  ((mask . << . 7) . || . ((len . << . 1) . || . 0))))
 
   (define (push-args args)
 	(for/list ([arg args]
@@ -626,13 +651,26 @@
 					  ['* 'imulq])])
 		 `(,(Instr 'movq `(,(to-X86-val e2) ,dst))
 		   ,(Instr instr `(,(to-X86-val e1) ,dst))))]
-	  [(Prim 'vector-ref `(,v ,i))
-	   (list (Instr 'movq `(,v ,(Reg 'r11)))
-			 (Instr 'movq `(,(Deref 'r11 (* 8 (+ (Int-value i) 1))) ,dst)))]
-	  [(Prim 'vector-set! `(,v ,i ,arg))
-	   (list (Instr 'movq `(,v ,(Reg 'r11)))
-			 (Instr 'movq `(,(to-X86-val arg) ,(Deref 'r11 (* 8 (+ (Int-value i) 1)))))
-			 (Instr 'movq `(,(Imm 0) ,dst)))]
+
+	  [(Prim (or 'vector-ref 'vectorof-ref) `(,v ,i))
+	   (let ([mem (cond
+					[(Int? i) (Deref 'r11 (* 8 (+ (Int-value i) 1)))]
+					[else (DerefEx (Reg 'r11) i 8 8)])])
+		 (list (Instr 'movq `(,v ,(Reg 'r11)))
+			   (Instr 'movq `(,mem ,dst))))]
+	  [(Prim (or 'vector-set! 'vectorof-set!) `(,v ,i ,arg))
+	   (let ([mem (cond
+					[(Int? i) (Deref 'r11 (* 8 (+ (Int-value i) 1)))]
+					[else (DerefEx (Reg 'r11) i 8 8)])])
+		 (list (Instr 'movq `(,v ,(Reg 'r11)))
+			   (Instr 'movq `(,(to-X86-val arg) ,mem))
+			   ;(Instr 'movq `(,(Imm 0) ,dst))
+			   ))]
+	  [(Prim 'vectorof-length `(,arr))
+	   (list (Instr 'movq `(,arr ,(Reg 'r11)))
+			 (Instr 'movq `(,(Deref 'r11 0) ,dst))
+			 (Instr 'andq `(,(Imm #x3FFFFFFFFFFFFFFC) ,dst)))] ;;see array-header
+
 	  [(Prim (or 'eq? '< '<= '> '>=) `(,e1 ,e2))
 	   (match-let ([`(,op . ,cc) (cmpop->flag (Prim-op expr))])
 		 (cond 
@@ -640,14 +678,42 @@
 		   [else `(,(Instr 'cmpq `(,(to-X86-val e2) ,(to-X86-val e1))) 
 					,(Instr 'set (list cc (ByteReg 'al))) 
 					,(Instr 'movzbq (list (ByteReg 'al) dst)))]))]
+
 	  [(or (Allocate bytes ts) (AllocateClosure bytes ts _))
-	   (list (Instr 'movq `(,(Global 'free_ptr) ,(Reg 'r11)))
-			 (Instr 'addq `(,(Imm bytes) ,(Global 'free_ptr)))
-			 (Instr 'movq `(,(Imm (get-vec-tag ts)) ,(Deref 'r11 0)))
-			 (Instr 'movq `(,(Reg 'r11) ,dst)))]
+	   (let* ([mask (let pointer-mask ([ts* (cdr ts)])
+					  (cond
+						[(null? ts*) 0]
+						[else (bitwise-ior (arithmetic-shift (pointer-mask (cdr ts*)) 1) 
+										   (match (car ts*)
+											 [`(Vector ,t ...) 1]
+											 [else 0]))]))]
+			  [len (length (cdr ts))]
+			  [<< arithmetic-shift]
+			  [|| bitwise-ior]
+			  [header ((mask . << . 7) . || . (len . << . 1))])
+		 (list (Instr 'movq `(,(Global 'free_ptr) ,(Reg 'r11)))
+			   (Instr 'addq `(,(Imm bytes) ,(Global 'free_ptr)))
+			   (Instr 'movq `(,(Imm header) ,(Deref 'r11 0)))
+			   (Instr 'movq `(,(Reg 'r11) ,dst))))]
+	  [(AllocateHom len bytes ts)
+	   (let* ([pointer? (match ts
+						  ['(Vectorof Integer) 0]
+						  [else 1])]
+			  [<< arithmetic-shift]
+			  [|| bitwise-ior]
+			  [arr? (1 . << . 62)]
+			  [mask (arr? . || . (pointer? . << . 1))]) ;(arr? . || . ((len  . << . 2) . || . (pointer? . << . 1)))))
+		 (list (Instr 'movq `(,(Global 'free_ptr) ,(Reg 'r11)))
+			   (Instr 'addq `(,(to-X86-val bytes) ,(Global 'free_ptr)))
+			   (Instr 'movq `(,(to-X86-val len) ,(Reg 'rax)))
+			   (Instr 'shlq `(,(Imm 2) ,(Reg 'rax)))
+			   (Instr 'xorq `(,(Imm mask) ,(Reg 'rax)))
+			   (Instr 'movq `(,(Reg 'rax) ,(Deref 'r11 0)))
+			   (Instr 'movq `(,(Reg 'r11) ,dst))))]
+
 	  [(Collect bytes)
 	   (list (Instr 'movq `(,(Reg rootstack-reg) ,(Reg 'rdi)))
-			 (Instr 'movq `(,(Imm bytes) ,(Reg 'rsi)))
+			 (Instr 'movq `(,(to-X86-val bytes) ,(Reg 'rsi)))
 			 (Callq 'collect 2))]))
 
   (define (trans-seq stmt)
@@ -661,7 +727,7 @@
 						  ,(IndirectCallq f (length args)))]
 		[(Collect bytes)
 		 `(,(Instr 'movq `(,(Reg rootstack-reg) ,(Reg 'rdi)))
-			,(Instr 'movq `(,(Imm bytes) ,(Reg 'rsi)))
+			,(Instr 'movq `(,(to-X86-val bytes) ,(Reg 'rsi)))
 			,(Callq 'collect 2))]))
 	(match stmt
 	  [(Assign dst expr) (trans-assign dst expr)]
@@ -1110,12 +1176,28 @@
   (define (patch-instr instr)
 	(match instr
 		   [(Instr 'movq `(,arg ,arg)) '()] ;;del
-		   [(Instr 'movq (list (Deref reg1 offset1) (Deref reg2 offset2)))
-			`(,(Instr 'movq (list (Deref reg1 offset1) (Reg 'rax)))
-			   ,(Instr 'movq (list (Reg 'rax) (Deref reg2 offset2))))]
-		   [(Instr 'addq `(,(Deref r1 offset1) ,(Deref r2 offset2)))
+
+		   ;;patch DerefEx TODO optimize
+		   [(Instr 'movq `(,(DerefEx base (and var (? Deref?)) stride offset) ,arg2))
+			(cons (Instr 'movq `(,var ,(Reg 'rax)))
+				  (patch-instr (Instr 'movq `(,(DerefEx base (Reg 'rax) stride offset) ,arg2))))]
+		   [(Instr 'movq `(,(and arg1 (? Reg?)) ,(DerefEx base (and var (? Deref?)) stride offset)))
+			`(,(Instr 'movq `(,var ,(Reg 'rax)))
+			   ,(Instr 'movq `(,arg1 ,(Deref base (Reg 'rax) stride offset))))]
+		   [(Instr 'movq `(,(and arg1 (? Deref?)) ,(DerefEx base (and var (? Deref?)) stride offset)))
+			`(,(Instr 'movq `(,var ,(Reg 'rax)))
+			   ,(Instr 'leaq `(,(DerefEx base (Reg 'rax) stride offset) ,base))
+			   ,(Instr 'movq `(,arg1 ,(Deref (Reg-name base) 0))))]
+
+		   [(Instr 'movq `(,(and arg1 (or (? Deref?) (? DerefEx?)))
+						   ,(and arg2 (or (? Deref?) (? DerefEx?)))))
+			`(,(Instr 'movq `(,arg1 ,(Reg 'rax)))
+			   ,(Instr 'movq `(,(Reg 'rax) ,arg2)))]
+				 
+			  
+		   [(Instr (and op (or 'addq 'subq 'imulq)) `(,(Deref r1 offset1) ,(Deref r2 offset2)))
 			`(,(Instr 'movq `(,(Deref r1 offset1) ,(Reg 'rax)))
-			   ,(Instr 'addq `(,(Reg 'rax) ,(Deref r2 offset2))))]
+			   ,(Instr op `(,(Reg 'rax) ,(Deref r2 offset2))))]
 		   [(Instr 'cmpq `(,x ,(Imm n)))
 			`(,(Instr 'movq `(,(Imm n) ,(Reg 'rax))) 
 			   ,(Instr 'cmpq `(,x ,(Reg 'rax))))]
@@ -1132,18 +1214,17 @@
 
   (define (patch-CFG lab-blks)
 	(for/list ([lab-blk lab-blks])
-			  (match-let ([(cons lab (Block binfo stmts)) lab-blk])
-						 (cons lab
-							   (Block binfo 
-									  (foldr 
-										(lambda (instr acc)
-										  (append (patch-instr instr)  acc))
-										'()
-										stmts))))))
-
+	  (match-let ([(cons lab (Block binfo stmts)) lab-blk])
+		(cons lab
+			  (Block binfo 
+					 (foldr 
+					   (lambda (instr acc)
+						 (append (patch-instr instr)  acc))
+					   '()
+					   stmts))))))
 
   (match p
-		 [(X86Program info CFG) (X86Program info (patch-CFG CFG))]
+		 ;[(X86Program info CFG) (X86Program info (patch-CFG CFG))]
 		 [(? ProgramDefs?) (map-program-def-body patch-CFG p)]))
 
 
