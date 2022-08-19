@@ -249,7 +249,8 @@
 		     `((addq 2 ,+)
 		       (imulq 2 ,*)
 		       (subq 2 ,(lambda (s d) (- d s)))
-		       (negq 1 ,-)))])
+		       (negq 1 ,-)
+			   (shlq 2 ,arithmetic-shift)))])
 
     (define/public (interp-x86-op op)
       (define (err)
@@ -879,6 +880,12 @@
 	   (define base ((interp-x86-exp env) (Reg r)))
 	   (define addr (+ base i))
 	   ((memory-read) addr)]
+	  [(DerefEx base var stride offset)
+	   (let* ([recur (interp-x86-exp env)]
+			  [base^ (recur base)]
+			  [var^ (recur var)]
+			  [addr (+ base^ (* var^ stride) offset)])
+		 ((memory-read) addr))]
 	  [else ((super interp-x86-exp env) ast)]))
         (copious "R3/interp-x86-exp" (observe-value result))
         result))
@@ -898,6 +905,12 @@
 	   (define addr (+ base i))
 	   ((memory-write!) addr value)
 	   env]
+	  [(DerefEx base var stride offset)
+	   (let* ([recur (interp-x86-exp env)]
+			  [base^ (recur base)]
+			  [var^ (recur var)]
+			  [addr (+ base^ (* var^ stride) offset)])
+		 ((memory-write!) addr value))]
 	  [dest
 	   (define name (get-name dest))
 	   (cons (cons name value) env)])))

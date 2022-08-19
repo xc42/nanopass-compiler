@@ -664,7 +664,7 @@
 					[else (DerefEx (Reg 'r11) i 8 8)])])
 		 (list (Instr 'movq `(,v ,(Reg 'r11)))
 			   (Instr 'movq `(,(to-X86-val arg) ,mem))
-			   ;(Instr 'movq `(,(Imm 0) ,dst))
+			   (Instr 'movq `(,(Imm 0) ,dst))
 			   ))]
 	  [(Prim 'vectorof-length `(,arr))
 	   (list (Instr 'movq `(,arr ,(Reg 'r11)))
