@@ -557,7 +557,7 @@
 			 (explicate-pred pred 
 							 (lz-add-CFG (explicate-effect thn acc^)) 
 							 (lz-add-CFG (explicate-effect els acc^))))]
-		  [(or (Prim 'vector-set! _) (Prim 'read '()) (? Collect?)) ;;side effect primitives(see utilities.rkt stmt?)
+		  [(or (Prim (or 'vector-set! 'vectorof-set!) _) (Prim 'read '()) (? Collect?)) ;;side effect primitives(see utilities.rkt stmt?)
 		   (Seq expr acc)]
 		  [(Apply f args) (Seq (Call f args) acc)]
 		  [_ acc];;can ommit pure expr
@@ -720,9 +720,12 @@
 	(define (trans-effect expr)
 	  (match expr
 		[(Prim 'read '()) `(,(Callq 'read_int 0))]
-		[(Prim 'vector-set! `(,v ,i ,arg))
-		 `(,(Instr 'movq `(,v ,(Reg 'r11)))
-			,(Instr 'movq `(,(to-X86-val arg) ,(Deref 'r11 (* 8 (+ (Int-value i) 1))))))]
+		[(Prim (or 'vector-set! 'vectorof-set!) `(,v ,i ,arg))
+		 (let ([mem (cond
+					  [(Int? i) (Deref 'r11 (* 8 (+ (Int-value i) 1)))]
+					  [else (DerefEx (Reg 'r11) i 8 8)])])
+		   `(,(Instr 'movq `(,v ,(Reg 'r11)))
+			  ,(Instr 'movq `(,(to-X86-val arg) ,mem))))]
 		[(Call f args) `(,@(push-args args)
 						  ,(IndirectCallq f (length args)))]
 		[(Collect bytes)

@@ -5,6 +5,7 @@
 (require "interp-Cif.rkt")
 (require "interp-Cwhile.rkt")
 (require "interp-Cvec.rkt")
+(require "interp-Cvecof.rkt")
 (require "interp-Cfun.rkt")
 (require (prefix-in runtime-config: "runtime-config.rkt"))
 (provide interp-Clambda interp-Clambda-mixin)
@@ -24,12 +25,13 @@
     ))
 
 (define Clambda-class (interp-Clambda-mixin
-                       (interp-Cfun-mixin
-                        (interp-Cvec-mixin
-                         (interp-Cwhile-mixin
-                          (interp-Cif-mixin
-                           (interp-Cvar-mixin
-                            interp-Llambda-prime-class)))))))
+						(interp-Cfun-mixin
+							(interp-Cvecof-mixin
+							(interp-Cvec-mixin
+							  (interp-Cwhile-mixin
+								(interp-Cif-mixin
+								  (interp-Cvar-mixin
+									interp-Llambda-prime-class))))))))
   
 (define (interp-Clambda p)
   (send (new Clambda-class) interp-program p))

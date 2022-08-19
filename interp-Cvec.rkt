@@ -5,7 +5,7 @@
 (require "interp-Cif.rkt")
 (require "interp-Cwhile.rkt")
 (require (prefix-in runtime-config: "runtime-config.rkt"))
-(provide interp-Cvec interp-Cvec-mixin)
+(provide interp-Cvec-class interp-Cvec interp-Cvec-mixin)
 
 (define (interp-Cvec-mixin super-class)
   (class super-class
@@ -56,11 +56,11 @@
         [else (error "interp-program unhandled" ast)]))
     ))
 
+(define interp-Cvec-class (interp-Cvec-mixin
+						  (interp-Cwhile-mixin
+							(interp-Cif-mixin
+							  (interp-Cvar-mixin
+								interp-Lvec-prime-class)))))
 (define (interp-Cvec p)
-  (define Cvec-class (interp-Cvec-mixin
-                      (interp-Cwhile-mixin
-                       (interp-Cif-mixin
-                        (interp-Cvar-mixin
-                         interp-Lvec-prime-class)))))
-  (send (new Cvec-class) interp-program p))
+  (send (new interp-Cvec-class) interp-program p))
 
