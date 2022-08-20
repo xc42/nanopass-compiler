@@ -644,13 +644,21 @@
 		 (match-let ([(Int n) e]) `(,(Instr 'movq (list (Imm (- n)) dst))))
 		 `(,(Instr 'movq (list e dst)) ,(Instr 'negq (list dst))))]
 
-	  [(Prim (or '+ '- '*) `(,e1 ,e2)) 
-	   (let ([instr (match (Prim-op expr)
+	  [(Prim (and op (or '+ '- '*)) `(,e1 ,e2)) 
+	   (let ([instr (match op
 					  ['+ 'addq]
 					  ['- 'subq]
 					  ['* 'imulq])])
-		 `(,(Instr 'movq `(,(to-X86-val e2) ,dst))
-		   ,(Instr instr `(,(to-X86-val e1) ,dst))))]
+		 (match `(,dst ,e1 ,e2)
+		   [`(,dst^ ,(Int n) ,(Int m)) `(,(Instr 'movq `(,(Imm ((eval op) n m)) ,dst^)))]
+		   [`(,dst^ ,dst^ ,e2^) `(,(Instr instr `(,(to-X86-val e2^) ,dst^)))]
+		   [`(,dst^ ,e1^ ,dst^) (match op
+								  ['- `(,(Instr 'negq `(,dst^))
+									    ,(Instr 'addq `(,(to-X86-val e1^) ,dst^)))]
+								  [else `(,(Instr instr `(,e1^ ,dst^)))])]
+		   [else `(,(Instr 'movq `(,(to-X86-val e1) ,dst))
+					,(Instr instr `(,(to-X86-val e2) ,dst)))]))]
+
 
 	  [(Prim (or 'vector-ref 'vectorof-ref) `(,v ,i))
 	   (let ([mem (cond
@@ -669,7 +677,8 @@
 	  [(Prim 'vectorof-length `(,arr))
 	   (list (Instr 'movq `(,arr ,(Reg 'r11)))
 			 (Instr 'movq `(,(Deref 'r11 0) ,dst))
-			 (Instr 'andq `(,(Imm #x3FFFFFFFFFFFFFFC) ,dst)))] ;;see array-header
+			 (Instr 'andq `(,(Imm #x3FFFFFFFFFFFFFFC) ,dst))
+			 (Instr 'shrq `(,(Imm 2) ,dst)))] ;;see AllocateHom instr
 
 	  [(Prim (or 'eq? '< '<= '> '>=) `(,e1 ,e2))
 	   (match-let ([`(,op . ,cc) (cmpop->flag (Prim-op expr))])

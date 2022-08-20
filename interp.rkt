@@ -250,7 +250,8 @@
 		       (imulq 2 ,*)
 		       (subq 2 ,(lambda (s d) (- d s)))
 		       (negq 1 ,-)
-			   (shlq 2 ,arithmetic-shift)))])
+			   (shrq 2 ,(lambda (n num) (arithmetic-shift num (- n))))
+			   (shlq 2 ,(lambda (n num) (arithmetic-shift num n)))))])
 
     (define/public (interp-x86-op op)
       (define (err)
@@ -910,7 +911,8 @@
 			  [base^ (recur base)]
 			  [var^ (recur var)]
 			  [addr (+ base^ (* var^ stride) offset)])
-		 ((memory-write!) addr value))]
+		 ((memory-write!) addr value)
+		 env)]
 	  [dest
 	   (define name (get-name dest))
 	   (cons (cons name value) env)])))
