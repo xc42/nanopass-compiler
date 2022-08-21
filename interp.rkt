@@ -467,7 +467,8 @@
     (set! x86-ops (hash-set* x86-ops
 		   'notq `(1 ,bitwise-not)
 		   'andq `(2 ,bitwise-and)
-		   'xorq `(2 ,bitwise-xor)))
+		   'xorq `(2 ,bitwise-xor)
+		   'orq  `(2 ,bitwise-ior)))
 
     (define/override (interp-x86-exp env)
       (lambda (ast)

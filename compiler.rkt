@@ -1,5 +1,6 @@
 #lang racket
 (require racket/set racket/stream racket/promise)
+(require (only-in racket/struct struct->list))
 (require data/queue)
 (require graph)
 (require "utilities.rkt")
@@ -637,7 +638,7 @@
 	   (match e
 		 [(Bool b) `(,(Instr 'movq (list (Imm (if b 0 1)) dst)))]
 		 [(Var v)  (if (equal? e dst)
-					 `(,(Instr 'xorq (list (Imm 1) dst)))
+					 `(,(Instr 'andq (list (Imm 1) dst)))
 					 `(,(Instr 'movq (list e dst)) ,(Instr 'xorq (list (Imm 1) dst))))])]
 	  [(Prim '- `(,e)) 
 	   (if (Int? e)
@@ -716,7 +717,7 @@
 			   (Instr 'addq `(,(to-X86-val bytes) ,(Global 'free_ptr)))
 			   (Instr 'movq `(,(to-X86-val len) ,(Reg 'rax)))
 			   (Instr 'shlq `(,(Imm 2) ,(Reg 'rax)))
-			   (Instr 'xorq `(,(Imm mask) ,(Reg 'rax)))
+			   (Instr 'orq `(,(Imm mask) ,(Reg 'rax)))
 			   (Instr 'movq `(,(Reg 'rax) ,(Deref 'r11 0)))
 			   (Instr 'movq `(,(Reg 'r11) ,dst))))]
 
@@ -879,27 +880,25 @@
 
 ;objects add to interference graph 
 (define (get-infer-objs rands)
-  (let ( [infer-obj
-		   (lambda (rand)
-			 (cond
-			   [(or (Var? rand) (Reg? rand)) rand]
-			   [(ByteReg? rand) (Reg (byte-reg->full-reg (ByteReg-name rand)))]
-			   [(Deref? rand) (Reg (Deref-reg rand))]
-			   [(Imm? rand) #f]
-			   [(Global? rand) rand]
-			   [(FunRef? rand) #f] ;leaq TODO
-			   [else (error (format "unhandled operand ~a in get-infer-objs" rand))]))])
-	(if (null? rands)
-		'()
-		(let ([obj (infer-obj (car rands))])
-		  (if obj 
-			  (cons obj (get-infer-objs (cdr rands)))
-			  (get-infer-objs (cdr rands)))))))
+  (let ([infer-obj
+		  (lambda (rand)
+			(match rand
+			  [(or (? Var?) (? Reg?)) `(,rand)]
+			  [(ByteReg name) `(,(Reg (byte-reg->full-reg name)))]
+			  [(Deref base _) `(,(Reg base))]
+			  [(? DerefEx?) (filter (lambda (r) (or (Var? r) (Reg? r))) (struct->list rand))]
+			  [(? Imm?) '()]
+			  [(? Global?) '()]
+			  [(? FunRef?) '()]
+			  [else (error (format "unhandled operand ~v in get-infer-objs" rand))]))])
+	(for/fold ([acc '()])
+	  ([rand rands])
+	  (append (infer-obj rand) acc))))
 
 (define (get-Gen-Kill instr)
   (let ([rw
 		  (match instr
-				 [(Instr (or 'addq 'subq) `(,arg1 ,arg2)) 
+				 [(Instr (or 'addq 'subq 'imulq 'shlq 'shrq 'andq 'orq 'xorq) `(,arg1 ,arg2)) 
 				  (cons `(,arg1 ,arg2) `(,arg2))]
 				 [(Instr (or 'movq 'movzbq 'leaq) `(,arg1 ,arg2)) 
 				  (cons `(,arg1) `(,arg2))]
@@ -917,8 +916,9 @@
 						'())] 
 				 
 				 [_ (error (format "unhandled instr ~a in get-Gen-Kill" instr))])])
+	(with-handlers ([exn:fail? (lambda (ex) (println "fail on instr:" instr) (raise ex))])
 	  (cons (apply set (get-infer-objs (car rw))) 
-			(apply set (get-infer-objs (cdr rw))))))
+			(apply set (get-infer-objs (cdr rw)))))))
 				
 
 
@@ -1042,8 +1042,8 @@
 						 [d* (get-infer-objs `(,d))])
 					 (set-for-each lives (lambda (x) (unless (or (equal? x fr) (equal? x (car d*))) (add-edge! g x (car d*))))))]
 
-				  [(JmpIf f lab) (unless (set-member? visited lab) (from-label lab))]
-				  [(Jmp lab) (unless (set-member? visited lab) (from-label lab))]
+				  [(JmpIf f lab) (unless (set-member? visited lab) (recur lab))]
+				  [(Jmp lab) (unless (set-member? visited lab) (recur lab))]
 
 				  [(or (Callq f _) (IndirectCallq f _))
 				   (set-for-each lives 
@@ -1145,7 +1145,10 @@
 
 	   [replace-instr 
 		 (lambda (instr)
-		   (let ([replace-rand (lambda (rand) (dict-ref var-map rand rand))])
+		   (let ([replace-rand (lambda (rand) 
+								  (match rand
+									[(? DerefEx?) (apply DerefEx (for/list ([f (struct->list rand)]) (dict-ref var-map f f)))]
+									[else (dict-ref var-map rand rand)]))])
 			 (match instr
 			   [(Instr op args) (Instr op (map replace-rand args))]
 			   [(IndirectCallq f arity) (IndirectCallq (replace-rand f) arity)]
