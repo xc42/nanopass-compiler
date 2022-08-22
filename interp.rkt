@@ -601,11 +601,13 @@
 			  (error 'interp-R3-class/memory-read
 					 "read uninitialized memory at address ~s"
 					 addr))
+			;(println (~a "memory-read: read value " value " at address " addr))
 			value))))
 
 	(define/public (memory-write!)
 	  (lambda (addr value)
 		(let-values ([(start stop name vect) (fetch-page addr)])
+		  ;(println (~a "memory-write: write value " value " at address " addr))
 		  (vector-set! vect (arithmetic-shift (- addr start) -3) value))))
 
 	(define/public (collect!)
@@ -621,6 +623,26 @@
 			  ;; are not reclaiming memory
 			  (set-box! fromspace_end	  (+ h-begin hs))
 			  (set-box! free_ptr	  h-begin))))))
+
+	(define/public ((allocate-arr!) len bytes ptr?)
+	  (verbose "allocate_arr" len bytes ptr?)
+	  (let* ([ret-addr (unbox free_ptr)]
+			 [|| bitwise-ior]
+			 [<< arithmetic-shift]
+			 [mask ((1 . << . 62) . || . (ptr? . << . 1))]
+			 [header (mask . || . (len . << . 2))])
+		(begin
+		  (set-box! free_ptr (+ ret-addr bytes))
+		  ((memory-write!) ret-addr header)
+		  ;(println (~a "allocate-arr!: write header " header " at addr " ret-addr))
+		  ret-addr)))
+
+	(define/public ((vectorof-length) addr)
+	  (verbose "vectorof-length" addr)
+	  (let ([header ((memory-read) addr)])
+		;(println (~a "vectorof_length: read value " header " at addr " addr))
+		(arithmetic-shift (bitwise-and header #x3FFFFFFFFFFFFFFC) -2)))
+
 
 	(define/public (initialize!)
 	  (lambda (stack-length heap_length)
@@ -946,6 +968,19 @@
 					  (define bytes-requested ((interp-x86-exp env) (Reg 'rsi)))
 					  ((collect!) rootstack bytes-requested)
 					  ((interp-x86-instr env) ss)]
+					 [(cons (Callq 'allocate_arr 3) ss)
+					  (let* ([interp (interp-x86-exp env)]
+							 [args (for/list ([i (in-range 3)] 
+											  [reg arg-registers])
+									 (interp (Reg reg)))]
+							 [addr (apply (allocate-arr!) args)]
+							 [new-env ((interp-x86-store env) (Reg 'rax) addr)])
+						((interp-x86-instr new-env) ss))]
+					 [(cons (Callq 'vectorof_length 1) ss)
+					  (let* ([arr ((interp-x86-exp env) (Reg 'rdi))]
+							 [len ((vectorof-length) arr)]
+							 [new-env ((interp-x86-store env) (Reg 'rax) len)])
+						((interp-x86-instr new-env) ss))]
 					 [(cons (Instr 'movq (list s d)) ss)
 					  (define value   ((interp-x86-exp env) s))
 					  (define new-env ((interp-x86-store env) d value))
@@ -1233,7 +1268,7 @@
   (string->symbol (string-append "rsp_" (number->string n))))
 
 (define/public (builtin-funs)
-  (set 'malloc 'alloc 'collect 'initialize 'read_int 'exit))
+  (set 'malloc 'alloc 'allocate_arr 'vectorof_length 'collect 'initialize 'read_int 'exit))
 
 (define/override (get-name ast)
 				 (match ast
@@ -1324,6 +1359,13 @@
 				   (when (pair? ast)
 					 (copious "R4/interp-x86-instr" (car ast)))
 				   (match ast
+					 [(cons (Instr 'leaq `(,(DerefEx base var stride offset) ,d)) ss)
+					  (let* ([recur (interp-x86-exp env)]
+							 [base^ (recur base)]
+							 [var^ (recur var)]
+							 [addr (+ base^ (* var^ stride) offset)]
+							 [new-env ((interp-x86-store env) d addr)])
+						((interp-x86-instr new-env) ss))]
 					 ;; Treat leaq like movq -Jeremy
 					 [(cons (Instr 'leaq (list s d)) ss)
 					  (define value   ((interp-x86-exp env) s))

@@ -676,10 +676,9 @@
 			   (Instr 'movq `(,(Imm 0) ,dst))
 			   ))]
 	  [(Prim 'vectorof-length `(,arr))
-	   (list (Instr 'movq `(,arr ,(Reg 'r11)))
-			 (Instr 'movq `(,(Deref 'r11 0) ,dst))
-			 (Instr 'andq `(,(Imm #x3FFFFFFFFFFFFFFC) ,dst))
-			 (Instr 'shrq `(,(Imm 2) ,dst)))] ;;see AllocateHom instr
+	   `(,@(push-args (list arr))
+		  ,(Callq 'vectorof_length 1)
+		  ,(Instr 'movq `(,(Reg 'rax) ,dst)))] 
 
 	  [(Prim (or 'eq? '< '<= '> '>=) `(,e1 ,e2))
 	   (match-let ([`(,op . ,cc) (cmpop->flag (Prim-op expr))])
@@ -708,18 +707,10 @@
 	  [(AllocateHom len bytes ts)
 	   (let* ([pointer? (match ts
 						  ['(Vectorof Integer) 0]
-						  [else 1])]
-			  [<< arithmetic-shift]
-			  [|| bitwise-ior]
-			  [arr? (1 . << . 62)]
-			  [mask (arr? . || . (pointer? . << . 1))]) ;(arr? . || . ((len  . << . 2) . || . (pointer? . << . 1)))))
-		 (list (Instr 'movq `(,(Global 'free_ptr) ,(Reg 'r11)))
-			   (Instr 'addq `(,(to-X86-val bytes) ,(Global 'free_ptr)))
-			   (Instr 'movq `(,(to-X86-val len) ,(Reg 'rax)))
-			   (Instr 'shlq `(,(Imm 2) ,(Reg 'rax)))
-			   (Instr 'orq `(,(Imm mask) ,(Reg 'rax)))
-			   (Instr 'movq `(,(Reg 'rax) ,(Deref 'r11 0)))
-			   (Instr 'movq `(,(Reg 'r11) ,dst))))]
+						  [else 1])])
+		 `(,@(push-args (list len bytes (Int pointer?)))
+			,(Callq 'allocate_arr 3)
+			,(Instr 'movq `(,(Reg 'rax) ,dst))))]
 
 	  [(Collect bytes)
 	   (list (Instr 'movq `(,(Reg rootstack-reg) ,(Reg 'rdi)))
@@ -1193,27 +1184,31 @@
 		   [(Instr 'movq `(,arg ,arg)) '()] ;;del
 
 		   ;;patch DerefEx TODO optimize
-		   [(Instr 'movq `(,(DerefEx base (and var (? Deref?)) stride offset) ,arg2))
+		   [(Instr 'movq `(,(DerefEx base (and var (? Deref?)) stride offset) 
+							,arg2))
 			(cons (Instr 'movq `(,var ,(Reg 'rax)))
 				  (patch-instr (Instr 'movq `(,(DerefEx base (Reg 'rax) stride offset) ,arg2))))]
-		   [(Instr 'movq `(,(and arg1 (? Reg?)) ,(DerefEx base (and var (? Deref?)) stride offset)))
+		   [(Instr 'movq `(,(and arg1 (or (? Imm?) (? Reg?))) 
+							,(DerefEx base (and var (? Deref?)) stride offset)))
 			`(,(Instr 'movq `(,var ,(Reg 'rax)))
-			   ,(Instr 'movq `(,arg1 ,(Deref base (Reg 'rax) stride offset))))]
-		   [(Instr 'movq `(,(and arg1 (? Deref?)) ,(DerefEx base (and var (? Deref?)) stride offset)))
+			   ,(Instr 'movq `(,arg1 ,(DerefEx base (Reg 'rax) stride offset))))]
+		   [(Instr 'movq `(,(and arg1 (? Deref?)) 
+							,(DerefEx base (and var (? Deref?)) stride offset)))
 			`(,(Instr 'movq `(,var ,(Reg 'rax)))
 			   ,(Instr 'leaq `(,(DerefEx base (Reg 'rax) stride offset) ,base))
-			   ,(Instr 'movq `(,arg1 ,(Deref (Reg-name base) 0))))]
+			   ,(Instr 'movq `(,arg1 ,(Reg 'rax)))
+			   ,(Instr 'movq `(,(Reg 'rax) ,(Deref (Reg-name base) 0))))]
 
-		   [(Instr 'movq `(,(and arg1 (or (? Deref?) (? DerefEx?)))
-						   ,(and arg2 (or (? Deref?) (? DerefEx?)))))
+		   [(Instr 'movq `(,(and arg1 (or (? Deref?) (? DerefEx?) (? Global?))) 
+							,(and arg2 (or (? Deref?) (? DerefEx?) (? Global?)))))
 			`(,(Instr 'movq `(,arg1 ,(Reg 'rax)))
 			   ,(Instr 'movq `(,(Reg 'rax) ,arg2)))]
-				 
-			  
-		   [(Instr (and op (or 'addq 'subq 'imulq)) `(,(Deref r1 offset1) ,(Deref r2 offset2)))
-			`(,(Instr 'movq `(,(Deref r1 offset1) ,(Reg 'rax)))
-			   ,(Instr op `(,(Reg 'rax) ,(Deref r2 offset2))))]
-		   [(Instr 'cmpq `(,x ,(Imm n)))
+
+		   [(Instr (and op (or 'addq 'subq 'imulq)) `(,arg1 ,(and arg2 (or (? Deref?) (? DerefEx?) (? Global?)))))
+			`(,(Instr 'movq `(,arg2 ,(Reg 'rax)))
+			   ,(Instr op `(,arg1 ,(Reg 'rax)))
+			   ,(Instr 'movq `(,(Reg 'rax) ,arg2)))]
+		   [(Instr 'cmpq `(,(and x (? Deref?)) ,(Imm n)))
 			`(,(Instr 'movq `(,(Imm n) ,(Reg 'rax))) 
 			   ,(Instr 'cmpq `(,x ,(Reg 'rax))))]
 		   [(Instr 'leaq `(,src ,(and dst (not (? Reg?)))))  ;;dst of leaq must be register
@@ -1298,7 +1293,13 @@
 				 [(Imm n) (~a "$" n)]
 				 [(Global g) (~a  g "(%rip)")]
 				 [(Deref r o) (format "~a(%~a)" o r)]
-				 [(FunRef label arity) (~a label "(%rip)")]))])
+				 [(FunRef label arity) (~a label "(%rip)")]
+				 [(DerefEx base var stride offset) 
+				  (let ([f (lambda (x) (match x
+										 [(Reg r) (~a "%" r)]
+										 [else (~a x)]))])
+					(format "~a(~a,~a,~a)" offset (f base) (f var) (f stride)))]
+				 ))])
 
 	  (letrec ([instr-printer (lambda (instr)
 								(match instr
