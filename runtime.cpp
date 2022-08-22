@@ -668,3 +668,16 @@ int64_t proxy_vector_set(int64_t* vec, int i, int64_t arg) {
 }
 
 
+int64_t vectorof_length(int64_t* arr)
+{
+	return ((*arr) & 0x3FFFFFFFFFFFFFFC) >> 2;
+}
+
+int64_t* allocate_arr(int64_t len, size_t bytes, int is_ptr)
+{
+	auto head = free_ptr;
+	free_ptr += len + 1;
+	*head = len << 2;
+	*head |= (1LL << 62) | is_ptr << 1;
+	return head;
+}
