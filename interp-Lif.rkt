@@ -17,6 +17,8 @@
       (match op
         ['+ fx+]
         ['- fx-]
+		['* fx*]
+		['/ fxquotient]
         ['read read-fixnum]
         ['not (lambda (v) (match v [#t #f] [#f #t]))]
         ['eq? (lambda (v1 v2)

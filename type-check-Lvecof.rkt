@@ -16,7 +16,8 @@
     (inherit check-type-equal?)
 
     (define/override (operator-types)
-      (append '((* . ((Integer Integer) . Integer)))
+      (append '((* . ((Integer Integer) . Integer))
+				(/ . ((Integer Integer) . Integer)))
               (super operator-types)))
     
     (define/override (type-check-exp env)

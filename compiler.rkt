@@ -659,6 +659,21 @@
 								  [else `(,(Instr instr `(,e1^ ,dst^)))])]
 		   [else `(,(Instr 'movq `(,(to-X86-val e1) ,dst))
 					,(Instr instr `(,(to-X86-val e2) ,dst)))]))]
+	  [(Prim '/ `(,e1 ,e2)) ;TODO
+	  ;;idiv <reg32>
+	  ;;idiv <mem>
+	   (match `(,dst ,e1 ,e2)
+		 [`(,dst ,(Int n) ,(Int m)) `(,(Instr 'movq `(,(Imm (quotient n m)) ,dst)))]
+		 [`(,dst ,e1 ,(Int m))
+		   `(,(Instr 'movq `(,(to-X86-val e1) ,(Reg 'rax)))
+			  ,(Instr 'cqto '())
+			  ,(Instr 'movq `(,(to-X86-val e2) ,dst))
+			  ,(Instr 'idivq `(,dst))
+			  ,(Instr 'movq `(,(Reg 'rax) ,dst)))]
+		 [_ `(,(Instr 'movq `(,(to-X86-val e1) ,(Reg 'rax)))
+			   ,(Instr 'cqto '())
+			   ,(Instr 'idivq `(,(to-X86-val e2)))
+			   ,(Instr 'movq `(,(Reg 'rax) ,dst)))])]
 
 
 	  [(Prim (or 'vector-ref 'vectorof-ref) `(,v ,i))
@@ -893,6 +908,10 @@
 				  (cons `(,arg1 ,arg2) `(,arg2))]
 				 [(Instr (or 'movq 'movzbq 'leaq) `(,arg1 ,arg2)) 
 				  (cons `(,arg1) `(,arg2))]
+				 [(Instr 'cqto '()) ;;cqto (convert quad to oct), signed extend rax to rdx:rax
+				  (cons `(,(Reg 'rax)) `(,(Reg 'rdx)))] ;;implicit read/write rax,rdx
+				 [(Instr 'idivq `(,e))
+				  (cons `(,e ,(Reg 'rax) ,(Reg 'rdx)) `(,(Reg 'rax) ,(Reg 'rdx)))] ;;implicit read/write rax,rdx
 				 [(Instr 'negq `(,e)) (cons `(,e) `(,e))]
 				 [(Instr 'set `(,c ,arg2)) (cons '() `(,arg2))]
 				 [(Instr 'cmpq rands) (cons rands '())]
@@ -1004,11 +1023,11 @@
 (define (build-interference p)
   (define (build-from info lab-blks start)
 	(let* ([loc-ts (dict-ref info 'locals-types)]
-		   [infer-G
-			 (foldl 
-			   (lambda (v g) (add-vertex! g (Var v)) g) 
-			   (undirected-graph '()) 
-			   (map car loc-ts))])
+		   [move-relate (undirected-graph '())]
+		   [infer-G (let ([g (undirected-graph '())])
+					  (for ([v-ts loc-ts])
+						(add-vertex! g (Var (car v-ts))))
+					  g)])
 	  (define (from-label start)
 		(let ([visited (mutable-seteq)])
 		  (define (recur label)
@@ -1071,17 +1090,15 @@
   (let* ([color-map (make-hash)]
 		 [get-satur
 		   (lambda (v)
-			 (let get-color ([us (sequence->stream (in-neighbors G v))] [acc '()])
-			   (if (stream-empty? us)
-				   (apply set acc)
-				   (let ([u (stream-first us)])
-					 (cond 
-					   [(or (Var? u) (Global? u))
-						(if (hash-has-key? color-map u) 
-							(get-color (stream-rest us) (cons (hash-ref color-map u) acc))
-							(get-color (stream-rest us) acc))]
-					   [(Reg? u) (get-color (stream-rest us) (cons (register->color (Reg-name u)) acc))]
-					   [else (error (format "unkown object ~a in infer graph" u))])))))]
+			 (for/fold ([acc (set)])
+			   ([u (in-neighbors G v)])
+			   (match u
+				 [(or (? Var?) (? Global?)) 
+				  (if (hash-has-key? color-map u) 
+					(set-add acc (hash-ref color-map u))
+					acc)]
+				 [(Reg r) (set-add acc (register->color r))]
+				 [else (error (format "unkown object ~a in infer graph" u))])))]
 		 [cmp
 		   (lambda (v1 v2)
 			 (> (set-count (get-satur v1)) (set-count (get-satur v2))))]

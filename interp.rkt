@@ -296,6 +296,19 @@
 		  [(X86Program info ss)
 		   (let ([env ((interp-x86-instr '()) ss)])
 			 (lookup 'rax env))]
+
+		  [(cons (Instr 'cqto '()) ss) ;;division related
+		   ((interp-x86-instr env) ss)]
+		  [(cons (Instr 'idivq `(,e)) ss) ;;division
+		   (let* ([interp (interp-x86-exp env)]
+				  [dividen (interp (Reg 'rax))]
+				  [divsor (interp e)]
+				  [quo (quotient dividen divsor)]
+				  [rem (remainder dividen divsor)]
+				  [new-env (append `(,(cons 'rax quo) ,(cons 'rdx rem))
+								   env)])
+			 ((interp-x86-instr new-env) ss))]
+
 		  [(cons (Instr binary-op (list s d)) ss)
 		   (let ([s ((interp-x86-exp env) s)]
 				 [d ((interp-x86-exp env) d)]

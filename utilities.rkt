@@ -1665,7 +1665,7 @@ Changelog:
 
 
 (define src-primitives
-  '(read + - * eq? < <= > >= and or not
+  '(read + - * / eq? < <= > >= and or not
          vector vector-ref vector-set! vector-length
          procedure-arity
          boolean? integer? vector? procedure? void?
