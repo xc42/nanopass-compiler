@@ -61,7 +61,7 @@ Changelog:
          fix while 
          label-name lookup extend-env make-dispatcher assert
          fun-call? indirect-call?
-         read-fixnum read-program 
+         read-fixnum read-program parse-exp
 	 compile compile-file check-passes-suite interp-tests compiler-tests
          compiler-tests-gui compiler-tests-suite
          use-minimal-set-of-registers!
@@ -1678,8 +1678,28 @@ Changelog:
     [(? fixnum?) (Int e)]
     [(? boolean?) (Bool e)]
     [`(void) (Void)]
-    [`(let ([,x ,rhs]) ,body) (Let x (parse-exp rhs) (parse-exp body))]
+    ;[`(let ([,x ,rhs]) ,body) (Let x (parse-exp rhs) (parse-exp body))]
+    [`(let ([,x ,rhs]) ,body ... ,body_n)
+	  (Let x (parse-exp rhs) 
+		   (if (null? body)
+			 (parse-exp body_n)
+			 (Begin (map parse-exp body) (parse-exp body_n))))]
+	[`(let* ([,xs ,rhs] ...) ,body ... ,body_n) 
+	  (let ([body^ (if (null? body)
+					 (parse-exp body_n)
+					 (Begin (map parse-exp body) (parse-exp body_n)))])
+		(for/foldr ([acc body^])
+				   ([x xs]
+					[r rhs])
+				   (Let x (parse-exp r) acc)))]
+
     [`(if ,cnd ,thn ,els) (If (parse-exp cnd) (parse-exp thn) (parse-exp els))]
+	[`(cond (,pred ,body) ..1 (else ,els))
+	  (for/foldr ([acc (parse-exp els)])
+				 ([p pred]
+				  [b body])
+				 (If (parse-exp p) (parse-exp b) acc))]
+
     [`(lambda: ,ps : ,rt ,body)
      (Lambda ps rt (parse-exp body))]
     [`(lambda: ,ps ,body)
@@ -1690,8 +1710,11 @@ Changelog:
      (Project (parse-exp e) t)]
     [`(inject ,e ,t)
      (Inject (parse-exp e) t)]
-    [`(while ,cnd ,body)
-     (WhileLoop (parse-exp cnd) (parse-exp body))]
+    [`(while ,cnd ,body ... ,body_n)
+	  (WhileLoop (parse-exp cnd) 
+				 (if (null? body)
+				   (parse-exp body_n)
+				   (Begin (map parse-exp body) (parse-exp body_n))))]
     [`(set! ,x ,rhs)
      (SetBang x (parse-exp rhs))]
     [`(begin ,es ... ,e)
