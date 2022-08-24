@@ -1,5 +1,5 @@
 #lang racket
-(require racket/set racket/stream racket/promise)
+(require racket/set racket/promise)
 (require (only-in racket/struct struct->list))
 (require data/queue)
 (require graph)
@@ -1225,9 +1225,14 @@
 			`(,(Instr 'movq `(,arg2 ,(Reg 'rax)))
 			   ,(Instr op `(,arg1 ,(Reg 'rax)))
 			   ,(Instr 'movq `(,(Reg 'rax) ,arg2)))]
-		   [(Instr 'cmpq `(,(and x (? Deref?)) ,(Imm n)))
+
+		   [(Instr 'cmpq `(,x ,(Imm n)))
 			`(,(Instr 'movq `(,(Imm n) ,(Reg 'rax))) 
 			   ,(Instr 'cmpq `(,x ,(Reg 'rax))))]
+		   [(Instr 'cmpq `(,(and e1 (? Deref?)) ,(and e2 (? Deref?))))
+			`(,(Instr 'movq `(,e2 ,(Reg 'rax)))
+			   ,(Instr 'cmpq `(,e1 ,(Reg 'rax))))]
+
 		   [(Instr 'leaq `(,src ,(and dst (not (? Reg?)))))  ;;dst of leaq must be register
 			`(,(Instr 'leaq `(,src ,(Reg 'rax)))
 			   ,(Instr 'movq `(,(Reg 'rax) ,dst)))]
@@ -1279,24 +1284,23 @@
 					  (if (eq? fn 'main) ;;GC init
 						`(,(Instr 'movq `(,(Imm rootstack-size)  ,(Reg 'rdi)))
 						   ,(Instr 'movq `(,(Imm heap-size) ,(Reg 'rsi)))
-						   ,(Callq 'initialize 2))
+						   ,(Callq 'initialize 2)
+						   ,(Instr 'movq `(,(Global 'rootstack_begin) ,(Reg rootstack-reg)))
+						   ,(Instr 'movq `(,(Imm 0) ,(Deref rootstack-reg 0))) ;; init rootstack to empty(see runtime.c), only in main 
+						   )
 						'())
 					  (if (not (= 0 num-root-spills))
-						`(,(Instr 'addq `(,(Imm used-rootst-size) ,(Global  'rootstack_end)))
-						  ,(Instr 'movq `(,(Global 'rootstack_end) ,(Reg rootstack-reg)))
-						   ,@(if (eq? fn 'main)
-							   `(,(Instr 'movq `(,(Imm 0) ,(Deref rootstack-reg 0)))) ;; init rootstack to empty(see runtime.c), only in main 
-							   '()))
+						`(,(Instr 'addq `(,(Imm used-rootst-size) ,(Reg rootstack-reg))))
 						'())
 					  `(,(Jmp (fn-start-label fn)))))]
 		   [conclusion-label (string->symbol (~a (fn-start-label fn) 'conclusion))]
 		   [clean-up 
 			 (append
 			   `(,@(if (not (= 0 num-root-spills))
-					 `(,(Instr 'subq `(,(Imm used-rootst-size) ,(Global 'rootstack_end))))
+					 `(,(Instr 'subq `(,(Imm used-rootst-size) ,(Reg rootstack-reg))))
 					 '())
 				  ,(Instr 'addq `(,(Imm align-stack-size) ,(Reg 'rsp))))
-			   `(,@(for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg)))
+			   `(,@(for/list ([reg (in-set used-callee-regs)]) (Instr `popq `(,reg))) ;;pop called-saved register
 				  ,(Instr 'popq `(,(Reg 'rbp)))))]
 		   [conclude (Block '() (append clean-up `(,(Retq))))]
 		   [CFG^ (append `((,fn . ,prelude)

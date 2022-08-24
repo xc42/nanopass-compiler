@@ -137,5 +137,5 @@
 	))
 ;(interp-tests "r8" type-check-Llambda r8-passes interp-Llambda "r8_test" (tests-for "r8"))
 ;(compiler-tests "r8" type-check-Llambda r8-passes "r8_test" (tests-for "r8"))
-(interp-tests "arr" type-check-Llambda r8-passes interp-Llambda "arr_test" (tests-for "arr_test_6"))
+(interp-tests "arr" type-check-Llambda r8-passes interp-Llambda "arr_test" (tests-for "arr_test"))
 (compiler-tests "arr" type-check-Llambda r8-passes "arr_test" (tests-for "arr"))

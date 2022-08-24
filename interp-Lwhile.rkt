@@ -1,5 +1,4 @@
 #lang racket
-(require racket/fixnum)
 (require "utilities.rkt")
 (require "interp-Lif.rkt")
 (provide interp-Lwhile interp-Lwhile-class)
