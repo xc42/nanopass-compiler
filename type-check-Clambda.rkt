@@ -6,6 +6,7 @@
 (require "type-check-Cvec.rkt")
 (require "type-check-Cvecof.rkt")
 (require "type-check-Cfun.rkt")
+(require "type-check-Cstruct.rkt")
 (require "type-check-Llambda.rkt")
 (provide type-check-Clambda type-check-Clambda-class type-check-Clambda-mixin)
 
@@ -48,13 +49,14 @@
 
 (define type-check-Clambda-class
   (type-check-Clambda-mixin
-	(type-check-Cfun-mixin
-	  (type-check-Cvecof-mixin
-		(type-check-Cvec-mixin
-		  (type-check-Cwhile-mixin
-			(type-check-Cif-mixin
-			  (type-check-Cvar-mixin
-				type-check-Llambda-class))))))))
+	(type-check-Cstruct-mixin
+	  (type-check-Cfun-mixin
+		(type-check-Cvecof-mixin
+		  (type-check-Cvec-mixin
+			(type-check-Cwhile-mixin
+			  (type-check-Cif-mixin
+				(type-check-Cvar-mixin
+				  type-check-Llambda-class)))))))))
       
 (define (type-check-Clambda p)
   (send (new type-check-Clambda-class) type-check-program p))

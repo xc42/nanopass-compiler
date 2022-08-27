@@ -1,6 +1,7 @@
 #lang racket
 (require "utilities.rkt")
-(require "type-check-Lfun.rkt")
+;(require "type-check-Lfun.rkt")
+(require "type-check-Lstruct.rkt")
 (provide type-check-Llambda type-check-Llambda-class typed-vars)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -13,7 +14,8 @@
 (define typed-vars (make-parameter #f))
 
 (define type-check-Llambda-class
-  (class type-check-Lfun-class
+  ;(class type-check-Lfun-class
+  (class type-check-Lstruct-class
     (super-new)
     (inherit check-type-equal?)
     (inherit-field max-parameters)
@@ -69,3 +71,5 @@
 
 (define (type-check-Llambda p)
   (send (new type-check-Llambda-class) type-check-program p))
+
+

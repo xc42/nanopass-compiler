@@ -1,6 +1,5 @@
 #lang racket
 (require "utilities.rkt")
-(require "type-check-Cvar.rkt")
 (require "type-check-Lwhile.rkt")
 (provide type-check-Lvec type-check-Lvec-class)
 

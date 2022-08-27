@@ -91,6 +91,10 @@ Changelog:
          (contract-out [struct HasType ((expr exp?) (type type?))])
          (struct-out Void)
          (contract-out [struct StructDef ((name symbol?) (field* param-list?))])
+         (contract-out [struct StructCtor ((name symbol?) (es* exp-list?))])
+		 (contract-out [struct StructGetter ((name symbol?) (field symbol?) (idx nonnegative-integer?) (stct exp?))])
+		 (contract-out [struct StructSetter ((name symbol?) (field symbol?) (idx nonnegative-integer?) (stct exp?) (e exp?))])
+		 
          (contract-out [struct Apply ((fun exp?) (arg* exp-list?))])
          (contract-out [struct Def ((name symbol?) (param* param-list?) (rty type?) (info any?)
                                                    (body any?))])
@@ -838,6 +842,25 @@ Changelog:
                 (csp ast port mode)]
                ))))])
 
+(struct StructCtor (name es*)  #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc (make-constructor-style-printer 
+						(lambda (obj) 'StructCtor)
+						(lambda (obj) (struct->list obj))))])
+
+(struct StructGetter (name field idx stct)  #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc (make-constructor-style-printer 
+						(lambda (obj) 'StructGetter)
+						(lambda (obj) (struct->list obj))))])
+
+(struct StructSetter (name field idx stct e)  #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc (make-constructor-style-printer 
+						(lambda (obj) 'StructSetter)
+						(lambda (obj) (struct->list obj))))]) 
+
+
 (struct Lambda (param* rty body) #:transparent #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
   [(define write-proc
@@ -1532,6 +1555,9 @@ Changelog:
     [(Lambda ps rt body) #t]
     [(Prim op es) #t]
     [(Apply e es) #t]
+	[(? StructCtor?) #t]
+	[(? StructGetter?) #t]
+	[(? StructSetter?) #t]
     [(GlobalValue n) #t]
     [(Allocate n t) #t]
     [(? AllocateHom?) #t]
@@ -1601,6 +1627,7 @@ Changelog:
     [(Prim 'any-vector-set! es) #t]
     [(Prim 'vectorof-set! es) #t]
     [(Prim 'read '()) #t]
+	[(? StructSetter?) #t]
     [(Call f arg) #t]
     [else #f]))
 

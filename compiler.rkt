@@ -11,12 +11,16 @@
 (provide (all-defined-out))
 
 
-(define-syntax-rule (map-program-def f p)
+(define-syntax-rule (map-prog-fun-def f p)
   (match-let ([(ProgramDefs info defs) p])
-			 (ProgramDefs info (map f defs))))
+	(ProgramDefs info 
+				 (for/list ([def defs])
+						(match def
+						  [(? Def?) (f def)]
+						  [(? StructDef?) def])))))
 
-(define-syntax-rule (map-program-def-body f p)
-  (map-program-def (lambda (def) 
+(define-syntax-rule (map-prog-fun-def-body f p)
+  (map-prog-fun-def (lambda (def) 
 					 (match-let ([(Def fn ps rt info body) def])
 								(Def fn ps rt info (f body))))
 				   p))
@@ -25,17 +29,17 @@
 
 ;;apply f to expr recursively
 (define (fmap-expr f expr)
-	(match expr
-		   [(Prim op es) (Prim op (map f es))]
-		   [(If e1 e2 e3) (If (f e1) (f e2) (f e3))]
-		   [(Apply func args) (Apply (f func) (map f args))]
-		   [(Let v e body) (Let v (f e) (f body))]
-		   [(Lambda ps rt body) (Lambda ps rt (f body))]
-		   [(HasType e t) (HasType (f e) t)]
-		   [(SetBang v e) (SetBang v (f e))]
-		   [(Begin es e) (Begin (map f es) (f e))]
-		   [(WhileLoop cnd body) (WhileLoop (f cnd) (f body))]
-		   [else expr]))
+  (match expr
+	[(Prim op es) (Prim op (map f es))]
+	[(If e1 e2 e3) (If (f e1) (f e2) (f e3))]
+	[(Apply func args) (Apply (f func) (map f args))]
+	[(Let v e body) (Let v (f e) (f body))]
+	[(Lambda ps rt body) (Lambda ps rt (f body))]
+	[(HasType e t) (HasType (f e) t)]
+	[(SetBang v e) (SetBang v (f e))]
+	[(Begin es e) (Begin (map f es) (f e))]
+	[(WhileLoop cnd body) (WhileLoop (f cnd) (f body))]
+	[_ expr]))
 
 (define (shrink p)
   (define (shrink-exp e)
@@ -61,11 +65,9 @@
 	[(Program info body)
 	 (ProgramDefs info `(,(Def 'main '() 'Integer '() (shrink-exp body))))]
 	[(ProgramDefsExp info defs expr) 
-	 (ProgramDefs info (append
-						 (for/list ([def (in-list defs)])
-						   (match-let ([(Def fn ps rt info body) def])
-							 (Def fn ps rt info (shrink-exp body))))
-						 `(,(Def 'main '() 'Integer '() (shrink-exp expr)))))]))
+	 (let ([p^ (map-prog-fun-def-body shrink-exp (ProgramDefs info defs))])
+	   (ProgramDefs info (append (ProgramDefs-def* p^) 
+						 `(,(Def 'main '() 'Integer '() (shrink-exp expr))))))]))
 
 
 (define (uniquify p)
@@ -87,34 +89,37 @@
 							(extend-env env^ x x^))])
 			 (Lambda ps^ rt ((uniquify-exp env-ex) body)))]
 		  [else (fmap-expr uniq expr)]))))
-  (match p
-	[(Program info body) (Program info ((uniquify-exp '()) body))]
-	[(ProgramDefs info defs)
-	 (let ([global-env (foldl (lambda (def env) (extend-env env (Def-name def) (Def-name def))) '() defs)])
-	   (ProgramDefs info 
-					(for/list ([def (in-list defs)])
-					  (match-let ([(Def fn ps rt info body) def])
-						(let ([init-env 
-								(foldl 
-								  (lambda (param env) 
-									(let ([var (if (pair? param) (car param) param)])
-									  (extend-env env var var))) 
-								  global-env 
-								  ps)])
-						  (Def fn ps rt info ((uniquify-exp init-env) body)))))))])) 
+
+  (define ((uniquify-def global-env) def)
+	(let ([init-env (for/fold ([env global-env])
+					  ([p (Def-param* def)])
+					  (let ([var (if (pair? p) (car p) p)])
+						(extend-env env var var)))]) 
+	  (match-let ([(Def fn ps rt info body) def])
+		(Def fn ps rt info ((uniquify-exp init-env) body)))))
+
+  (let ([global-env (for/fold ([env '()])
+					  ([d (ProgramDefs-def* p)])
+					  (match d
+						[(? Def?) (extend-env env (Def-name d) (Def-name d))]
+						[(StructDef name `([,fs : ,ft] ...)) 
+						 (for/fold ([acc (extend-env env name name)]) 
+						   ([f fs])
+						   (let ([getter (string->symbol (format "~a-~a" name f))]
+								 [setter (string->symbol (format "set-~a-~a!" name f))])
+							 (append `(,(cons getter getter) ,(cons setter setter)) acc)))]))])
+	(map-prog-fun-def (uniquify-def global-env) p)))
 
 
 (define (reveal-functions p)
-  (let ([fs (for/list ([def (ProgramDefs-def* p)]) 
-					(cons (Def-name def) (length (Def-param* def))))])
+  (let ([fs (for/list ([def (ProgramDefs-def* p)] #:when (Def? def))
+			  (cons (Def-name def) (length (Def-param* def))))])
 	(letrec ([reveal-functions*
 			   (lambda (expr)
 				 (match expr
-						[(Var v) (let ([f* (assv v fs)]) (if  f* (FunRef v (cdr f*)) expr))]
-						[else (fmap-expr reveal-functions* expr)]))])
-	  (match p
-			 [(? Program?) p]
-			 [(? ProgramDefs?) (map-program-def-body reveal-functions* p)]))))
+				   [(Var v) (let ([f* (assv v fs)]) (if  f* (FunRef v (cdr f*)) expr))]
+				   [else (fmap-expr reveal-functions* expr)]))])
+	  (map-prog-fun-def-body reveal-functions* p))))
 
 (define (free-variable expr)
   (match expr
@@ -211,7 +216,7 @@
 		(let-values ([(ps^ body^^) (convert-fun ps (convert-expr body^))])
 		  (Def name ps^ rt info body^^)))))
 
-  (map-program-def convert-def p))
+  (map-prog-fun-def convert-def p))
 						
 
 (define (convert-to-closure p)
@@ -262,13 +267,12 @@
 					  (HasType (HasType-expr fv) (convert-func-type (HasType-type fv))))]
 				  [clos-param (Var (gensym 'clos))]
 				  [clos-type `(Vector _ ,@(map HasType-type fvs))]
-				  [body^ 
-					(let let-header ([fvs* fvs] [idx 1])
-					  (if (null? fvs*)
-						(convert-expr body)
-						(Let (Var-name (HasType-expr (car fvs*))) 
-							 (Prim 'vector-ref `(,clos-param ,(Int idx)))
-							 (let-header (cdr fvs*) (+ 1 idx)))))]
+				  [body^ (for/fold ([acc (convert-expr body)])
+						   ([fv fvs]
+							[idx (in-naturals 1)])
+						   (Let (Var-name (HasType-expr fv)) 
+								(Prim 'vector-ref `(,clos-param ,(Int idx)))
+								acc))]
 				  [lift-fn 
 					(Def lift-fn-name 
 						 (cons `(,(Var-name clos-param) : ,clos-type) (convert-param-func-type ps))
@@ -380,12 +384,8 @@
 
 
 (define (expose-allocation p)
-  (define (calc-bytes-needed t)
-	(match t
-	  ['Integer 8]
-	  [`(,ps ... -> ,ts) 8] ;;function pointer
-	  [`(Vectorof ,_) 8] ;;only pointer	
-	  [`(Vector ,ts ...) (for/fold ([acc 8]) ([t* ts]) (+ acc (calc-bytes-needed t*)))]))
+  ;(match-let ([(ProgramDefs info defs) p])
+;	(define struct-fields (dict-ref info 'struct-fields)) ;;write in type-check-Lstruct
 
   (define (allocate-tuple es bytes alloc-expr)
 	(let* ([var-vec (gensym 'alloc)]
@@ -439,16 +439,24 @@
 
 
   (define (expose-allocation-expr expr)
-	(match expr
-	  [(HasType (Prim 'vector es) ts) 
-	   (let ([bytes (calc-bytes-needed ts)])
-		 (allocate-tuple (map expose-allocation-expr es) bytes (Allocate bytes ts)))]
-	  [(HasType (Closure arity es) ts)
-	   (let ([bytes (calc-bytes-needed ts)])
-		 (allocate-tuple (map expose-allocation-expr es) bytes (AllocateClosure bytes ts arity)))]
-	  [(HasType (Prim 'make-vector `(,len ,val)) ts) 
-	   (allocate-arr len (expose-allocation-expr val) ts)]
-	  [else (fmap-expr expose-allocation-expr expr)]))
+	(let ([calc-bytes-needed 
+			(lambda (t)
+			  (match t
+				[`(Vector ,ts ...) (+ 8 (* 8 (length ts)))] ;;fields are basic type(Integer=8) or pointers;
+				))])
+	  (match expr
+		[(HasType (Prim 'vector es) ts) 
+		 (let ([bytes (calc-bytes-needed ts)])
+		   (allocate-tuple (map expose-allocation-expr es) bytes (Allocate bytes ts)))]
+		[(HasType (Closure arity es) ts)
+		 (let ([bytes (calc-bytes-needed ts)])
+		   (allocate-tuple (map expose-allocation-expr es) bytes (AllocateClosure bytes ts arity)))]
+		[(HasType (Prim 'make-vector `(,len ,val)) ts) 
+		 (allocate-arr len (expose-allocation-expr val) ts)]
+		[(HasType (Apply (Var ctor) es) ts)
+		 (let ([bytes (calc-bytes-needed ts)])
+		   (allocate-tuple (map expose-allocation-expr es) bytes (Allocate bytes ts)))]
+		[else (fmap-expr expose-allocation-expr expr)])))
 
   (define (unwarp-HasType expr)
 	(match expr
@@ -457,7 +465,7 @@
 
   (match p
 	[(Program info e) (Program info (expose-allocation-expr e))]
-	[(? ProgramDefs?) (map-program-def-body (compose unwarp-HasType expose-allocation-expr) p)]))
+	[(? ProgramDefs?) (map-prog-fun-def-body (compose unwarp-HasType expose-allocation-expr) p)]))
 																				  
 
 			
@@ -487,7 +495,7 @@
 
   (match p
 		 [(Program info expr) (Program info (rco-expr expr))]
-		 [(? ProgramDefs?) (map-program-def-body rco-expr p)]))
+		 [(? ProgramDefs?) (map-prog-fun-def-body rco-expr p)]))
 
 
 (define (explicate-control p)
@@ -838,7 +846,7 @@
 				   #:unless (set-member? tail-labels (car lab-blk)))
 		  (match-let ([(Block binfo stmts) (cdr lab-blk)])
 			(cons (car lab-blk) (Block binfo (trans-stmts stmts))))))))
-  (map-program-def-body remove-for-lab-blks p))
+  (map-prog-fun-def-body remove-for-lab-blks p))
 
 					 
 
@@ -1017,7 +1025,7 @@
 				(Block (dict-set (Block-info blk) 'live-set live-set) 
 					   (Block-instr* blk))))))) ;;uncover
 
-	(map-program-def-body uncover p))
+	(map-prog-fun-def-body uncover p))
 
 
 (define (build-interference p)
@@ -1082,7 +1090,7 @@
 			   (Def fn ps rt info^ CFG))))
   (match p
 		 ;[(X86Program info CFG) (X86Program (cons `(conflicts . ,(build-from info CFG 'start)) info) CFG)]
-		 [(? ProgramDefs?) (map-program-def build-from-def p)]))
+		 [(? ProgramDefs?) (map-prog-fun-def build-from-def p)]))
 
 
 (require "priority_queue.rkt")
@@ -1190,7 +1198,7 @@
 	  (let-values ([(info* CFG*) (do-allocate fn (fn-start-label fn) info CFG )])
 		(Def fn ps rt info* CFG*))))
 
-  (map-program-def allocate-for-def p))
+  (map-prog-fun-def allocate-for-def p))
 									
 
 ;; patch-instructions : psuedo-x86 -> x86
@@ -1257,7 +1265,7 @@
 
   (match p
 		 ;[(X86Program info CFG) (X86Program info (patch-CFG CFG))]
-		 [(? ProgramDefs?) (map-program-def-body patch-CFG p)]))
+		 [(? ProgramDefs?) (map-prog-fun-def-body patch-CFG p)]))
 
 
 

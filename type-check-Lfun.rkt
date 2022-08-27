@@ -56,8 +56,7 @@
           [else ((super type-check-exp env) e)]
           )))
 
-    (define/public (type-check-def env)
-      (lambda (e)
+    (define/public ((type-check-def env) e ds^)
         (match e
           [(Def f (and p:t* (list `[,xs : ,ps] ...)) rt info body)
            (unless (< (length xs) max-parameters)
@@ -66,27 +65,30 @@
            (define new-env (append (map cons xs ps) env))
            (define-values (body^ ty^) ((type-check-exp new-env) body))
            (check-type-equal? ty^ rt body)
-           (Def f p:t* rt info body^)]
+           (cons (Def f p:t* rt info body^) ds^)]
           [else (error 'type-check "ill-formed function definition ~a" e)]
-          )))	 
+          ))	 
 
     (define/public (fun-def-type d)
       (match d [(Def f (list `[,xs : ,ps] ...) rt info body)  `(,@ps -> ,rt)]
         [else (error 'type-check "ill-formed function definition in ~a" d)]))
 
+	(define/public ((new-env-from-def) def env)
+	  (match def
+	    [(? Def?) (cons (cons (Def-name def) (fun-def-type def)) env)]
+		[else (error 'type-check "ill-formed function definition in ~a" def)]))
+
     (define/override (type-check-program e)
       (match e
         [(ProgramDefsExp info ds body)
-         (define new-env (for/list ([d ds])
-                           (cons (Def-name d) (fun-def-type d))))
-         (define ds^ (for/list ([d ds]) ((type-check-def new-env) d)))
+         (define new-env (foldl (new-env-from-def) '() ds))
+         (define ds^ (foldl (type-check-def new-env) '() ds))
          (define-values (body^ ty) ((type-check-exp new-env) body))
          (check-type-equal? ty 'Integer body)
          (ProgramDefsExp info ds^ body^)]
         [(ProgramDefs info ds)
-         (define new-env (for/list ([d ds]) 
-                           (cons (Def-name d) (fun-def-type d))))
-         (define ds^ (for/list ([d ds]) ((type-check-def new-env) d)))
+         (define new-env (foldl (new-env-from-def) '() ds))
+         (define ds^ (foldl (type-check-def new-env) '() ds))
          ;; TODO: check that main has Integer return type.
          (ProgramDefs info ds^)]
         [(Program info body)
@@ -98,4 +100,6 @@
 
 (define (type-check-Lfun p)
   (send (new type-check-Lfun-class) type-check-program p))
+
+
 
