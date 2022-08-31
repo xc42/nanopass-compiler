@@ -1416,7 +1416,7 @@
 					  ((initialize!) runtime-config:rootstack-size
 									 runtime-config:heap-size)
 					  (set! root-stack-pointer (unbox rootstack_begin))
-					  (define top-level (for/list ([d ds]) (interp-x86-def d)))
+					  (define top-level (for/list ([d ds] #:when (Def? d)) (interp-x86-def d)))
 					  ;; tie the knot
 					  #;(for/list ([b top-level])
 					  (set-mcdr! b (match (mcdr b)
@@ -1440,7 +1440,7 @@
 					  ((initialize!) runtime-config:rootstack-size
 									 runtime-config:heap-size)
 					  (set! root-stack-pointer (unbox rootstack_begin))
-					  (define top-level (for/list ([d ds]) (interp-x86-def d)))
+					  (define top-level (for/list ([d ds] #:when (Def? d)) (interp-x86-def d)))
 					  ;; tie the knot
 					  #;(for/list ([b top-level])
 					  (set-mcdr! b (match (mcdr b)

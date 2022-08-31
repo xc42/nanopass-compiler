@@ -46,7 +46,7 @@
       (verbose "interp-Lfun" p)
       (match p
         [(ProgramDefsExp info ds body)
-         (let ([top-level (for/list ([d ds]) (interp-def d))])
+         (let ([top-level (for/list ([d ds] #:when (Def? d)) (interp-def d))])
            (for/list ([f (in-dict-values top-level)])
              (set-box! f (match (unbox f)
                            [`(function ,xs ,body ())
@@ -55,7 +55,7 @@
         
         ;; For after the shrink pass.
         [(ProgramDefs info ds)
-         (define top-level (for/list ([d ds]) (interp-def d)))
+         (define top-level (for/list ([d ds] #:when (Def? d)) (interp-def d)))
          (for ([f (in-dict-values top-level)])
            (set-box! f (match (unbox f)
                          [`(function ,xs ,body ())

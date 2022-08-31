@@ -24,7 +24,7 @@
         [(ProgramDefs info ds)
          ((initialize!) runtime-config:rootstack-size
                         runtime-config:heap-size)
-         (define top-level (for/list ([d ds]) (interp-def d)))
+         (define top-level (for/list ([d ds] #:when (Def? d)) (interp-def d)))
          (for ([f (in-dict-values top-level)])
            (set-box! f (match (unbox f)
                          [`(function ,xs ,body ())

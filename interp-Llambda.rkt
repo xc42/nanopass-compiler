@@ -1,7 +1,7 @@
 #lang racket
-(require racket/fixnum)
 (require "utilities.rkt")
-(require "interp-Lfun.rkt")
+;(require "interp-Lfun.rkt")
+(require "interp-Lstruct.rkt")
 (provide interp-Llambda interp-Llambda-class)
 
 ;; Note to maintainers of this code:
@@ -9,7 +9,8 @@
 ;;   kept in sync with this code.
 
 (define interp-Llambda-class
-  (class interp-Lfun-class
+  ;(class interp-Lfun-class
+  (class interp-Lstruct-class
     (super-new)
 
     (define/override (interp-op op)
