@@ -39,26 +39,41 @@
 	[(SetBang v e) (SetBang v (f e))]
 	[(Begin es e) (Begin (map f es) (f e))]
 	[(WhileLoop cnd body) (WhileLoop (f cnd) (f body))]
+	[(StructCtor name es*) (StructCtor name (map f es*))]
+	[(StructGetter name field idx stct) (StructGetter name field idx (f stct))]
+	[(StructSetter name field idx stct e) (StructSetter name field idx (f stct) (f e))]
+	;[(or (? atm?) (? FunRef?) (? GlobalValue?) (? Collect?) ...) expr])) ;;note: no map on those types
 	[_ expr]))
 
+(define (fold-expr f init expr)
+  (let ([fold-recur (lambda (e acc) (fold-expr f acc e))])
+	(match expr
+	  [(Prim _ es) (foldl fold-recur init es)] 
+	  [(If e1 e2 e3) (foldl fold-recur init (list e1 e3 e3))]
+	  [(Apply f args) (foldl fold-recur init (cons f args))]
+	  [(Let x e body) (foldl fold-recur init (list e body))]
+	  [(Lambda `([,xs : ,ts] ...) rty body) (fold-expr f init body)] 
+	  [(HasType e t) (fold-expr f init e)]
+	  [(SetBang v e)  (fold-expr f init e)]
+	  [(Begin es body) (foldl fold-recur init (cons body  es))] ;;TODO order?
+	  [(WhileLoop cnd body) (foldl fold-recur init (list cnd body))]
+	  [(StructCtor _ es*) (foldl fold-recur init es*)]
+	  [(StructGetter _ _ _ stct) (fold-expr f init stct)]
+	  [(StructSetter _ _ _ stct e) (foldl fold-recur init (list stct e))]
+	  [(or (? atm?) (? FunRef?)) (f expr init)])))
+	
 (define (shrink p)
   (define (shrink-exp e)
 	(match e
-	  [(Prim op `(,e1 ,es ...))
+	  [(Prim op `(,e1 ,es ..1))
 	   (let* ([e1 (shrink-exp e1)]
 			  [es (map shrink-exp es)]
 			  [new-es (cons e1 es)]
 			  [T (Bool #t)]
 			  [F (Bool #f)])
 		 (match op
-		   ['- (if (eq? es '()) 
-				 (Prim op `(,e1))
-				 (Prim '+ `(,e1 ,(Prim '- es))))]
 		   ['and (If e1 (If (car es) T F) F)]
 		   ['or (If e1 T (If (car es) T F))]
-		   ;['<= (If (Prim '< new-es) T (If (Prim 'eq? new-es) T F))]
-		   ;['>= (Prim 'not `(,(Prim '< new-es)))]
-		   ;['>  (If (Prim 'not `(,(Prim '< new-es))) (If (Prim 'eq? new-es) F T) F)]
 		   [other (Prim op new-es)]))]
 	  [else (fmap-expr shrink-exp e)]))
   (match p
@@ -121,23 +136,17 @@
 				   [else (fmap-expr reveal-functions* expr)]))])
 	  (map-prog-fun-def-body reveal-functions* p))))
 
-(define (free-variable expr)
-  (match expr
-	[(? Var?) (set expr)]
-	[(? HasType?) (if (Var? (HasType-expr expr))
-					(set expr) ;;to keep var's type info, used in closure conversion pass
-					(free-variable (HasType-expr expr)))]
-	[(Let x e body) (set-union (free-variable e) (set-remove (free-variable body) (Var x)))]
-	[(Lambda ps rty body) (set-subtract (free-variable body) 
-										(for/set ([p ps]) (HasType (Var (car p)) (last p))))]
-	[(If e1 e2 e3) (apply set-union (map free-variable `(,e1 ,e3 ,e3)))]
-	[(Apply f args) (apply set-union (map free-variable (cons f args)))]
-	[(Prim op es) (apply set-union (map free-variable es))]
-	[(SetBang v e) (set-add (free-variable e) (Var v))]
-	[(Begin es body) (apply set-union (cons (free-variable body) (map free-variable es)))]
-	[(WhileLoop cnd body) (set-union (free-variable cnd) (free-variable body))]
-	[else (set)]))
 
+(define (free-variable expr)
+  (let ([join-proc (lambda (e fvs) (set-union fvs (free-variable e)))])
+	(match expr
+	  [(Var v) (set v)]
+	  [(HasType e t) (free-variable e)]
+	  [(Let x e body) (set-union (free-variable e) (set-remove (free-variable body) x))]
+	  [(Lambda `([,xs : ,ts] ...) rty body) (set-subtract (free-variable body) (apply set xs))]
+	  [(SetBang v e) (set-add (free-variable e) v)]
+	  [(? atm?) (set)]
+	  [else (fold-expr join-proc (set) expr)])))
 
 (define (convert-assignment p)
 
@@ -149,7 +158,7 @@
 	  [(Lambda ps rt body)
 	   (let-values ([(body^ A F) (gather-assigned-free body)]
 					[(xs) (for/set ([xt ps]) (car xt))]
-					[(fvs) (for/set ([fv (free-variable body)]) (Var-name fv))])
+					[(fvs) (free-variable body)])
 		 (values (Lambda ps rt body^) (set-subtract A xs) (set-subtract (set-union F fvs) xs)))]
 	  [(Let v e body) 
 	   (let-values ([(e^ Ae Fe)  (gather-assigned-free e)]
@@ -163,6 +172,10 @@
 	  [(Apply f args) (gather-es (cons f args) (lambda (es^) (Apply (car es^) (cdr es^))))]
 	  [(Begin es* body) (gather-es (cons body es*) (lambda (es^) (Begin (cdr es^) (car es^))))]
 	  [(WhileLoop cnd body) (gather-es `(,cnd ,body) (lambda (es^) (apply WhileLoop es^)))]
+	  [(StructCtor name es*) (gather-es es* (lambda (es^) (StructCtor name es^)))]
+	  [(StructGetter name field idx stct) (gather-es (list stct) (lambda (es^) (StructGetter name field idx (car es^))))]
+	  [(StructSetter name field idx stct e) 
+	   (gather-es (list stct e) (lambda (es^) (StructSetter name field idx (car es^) (last es^))))]
 	  [(HasType e t) (gather-es `(,e) (lambda (es^) (HasType (car es^) t)))]
 	  [_ (values expr (set) (set))]))
 
@@ -249,6 +262,11 @@
   (define (convert-param-func-type ps)
 	(match ps
 	  [`([,xs : ,ts] ...) (for/list ([x xs] [t ts]) `(,x : ,(convert-func-type t)))]))
+
+  (define (convert-struct st-def) ;;if struct's any filed contains function, need to convert to closure
+	(match-let ([(StructDef name `([,fs : ,fts] ...)) st-def])
+	  (list (StructDef name (for/list ([f fs] [ft fts]) `(,f : ,(convert-func-type ft)))))))
+
 		
   (define (convert-def def)
 	(let* ([lam-prefix (string->symbol (~a (Def-name def) "_lambda"))]
@@ -256,62 +274,75 @@
 		   [add-lift-fn (lambda (def)
 						  (set! lift-fns (cons def lift-fns)))])
 
-
-	  (define (convert-expr expr)
+	  (define ((convert-expr type-info) expr)
+		(define convert-recur (convert-expr type-info))
 		(match expr
 		  [(Lambda ps rt body) 
 		   (let* ([lift-fn-name (gensym lam-prefix)]
 				  [arity (length ps)]
-				  [fvs 
-					(for/list ([fv (free-variable expr)])
-					  (HasType (HasType-expr fv) (convert-func-type (HasType-type fv))))]
+				  [fvs (set->list (free-variable expr))] 
+				  [fv-ts (map type-info fvs)]
 				  [clos-param (Var (gensym 'clos))]
-				  [clos-type `(Vector _ ,@(map HasType-type fvs))]
-				  [body^ (for/fold ([acc (convert-expr body)])
+				  [clos-type `(Vector _ ,@fv-ts)]
+				  [ps^ (cons `(,(Var-name clos-param) : ,clos-type) 
+							 (convert-param-func-type ps))]
+				  [rt^ (convert-func-type rt)]
+				  [body^ (for/fold ([acc (convert-recur body)])
 						   ([fv fvs]
 							[idx (in-naturals 1)])
-						   (Let (Var-name (HasType-expr fv)) 
-								(Prim 'vector-ref `(,clos-param ,(Int idx)))
-								acc))]
-				  [lift-fn 
-					(Def lift-fn-name 
-						 (cons `(,(Var-name clos-param) : ,clos-type) (convert-param-func-type ps))
-						 (convert-func-type rt) 
-						 '() 
-						 body^)])
-
-			 (add-lift-fn lift-fn)
-			 (Closure arity (cons (FunRef lift-fn-name arity) fvs)))]
+						   (Let fv (Prim 'vector-ref `(,clos-param ,(Int idx))) acc))]
+				  [lift-fn (Def lift-fn-name ps^ rt^ '() body^)])
+			 (begin 
+			   (add-lift-fn lift-fn)
+			   (Closure arity (cons (FunRef lift-fn-name arity) (map Var fvs)))))]
 
 		  [(Apply f-expr args)
 		   (let ([tmp (gensym 'clos_tmp)])
-			 (Let  tmp (convert-expr f-expr)
+			 (Let  tmp (convert-recur f-expr)
 				   (Apply (Prim 'vector-ref `(,(Var tmp),(Int 0)))
-						  (cons (Var tmp) (map convert-expr args)))))]
+						  (cons (Var tmp) (map convert-recur args)))))]
 
 		  [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
-		  [else (fmap-expr convert-expr expr)]))
+		  [else (fmap-expr convert-recur expr)]))
 
+	  (define (scan-var expr)
+		(let ([var-map (make-hasheq)])
+		  (letrec ([memo (lambda (e)
+						   (match e
+							 [(HasType (Var v) t) 
+							  (hash-set! var-map v (convert-func-type t)) ;;if a variable has func type, convert to closure type
+							  (Var v)] ;;unwarp HasType
+							 [else (fmap-expr memo e)]))])
+			(values (fmap-expr memo expr)
+					(lambda (v)
+					  (let ([t (hash-ref var-map v #f)])
+						(unless t
+						  (error (~a "no type info found for " v)))
+						t))))))
+						  
 	  (match-let ([(Def name ps rt info body) def])
 		(let ([ps^ (convert-param-func-type
-						(if (eq? name 'main)
-						  ps
-						  (cons '(dummy_clos : (Vector _)) ps)))]
-			  [rt^ (convert-func-type rt)]
-			  [body^ (convert-expr body)])
-		  (cons (Def name ps^ rt^ info body^) lift-fns)))))
+					 (if (eq? name 'main)
+					   ps
+					   (cons '(dummy_clos : (Vector _)) ps)))]
+			  [rt^ (convert-func-type rt)])
+		  (let-values ([(body^ type-info) (scan-var body)])
+			(let ([body^^ ((convert-expr type-info) body^)])
+			  (cons (Def name ps^ rt^ info body^^) lift-fns)))))))
 
   (let* ([type-check
 		   (lambda (p)
 			 (parameterize ([typed-vars #t]) 
 			   (send (new type-check-Llambda-class) type-check-program p)))]
 		 [p^ (type-check p)])
-	(type-check ;;type-check again to "correct" type inconsistency of closure type(aka. vector) and function
+	(type-check  ;;type-check again to wrap HasType on Closure
 	  (ProgramDefs (ProgramDefs-info p^)
-				   (foldr (lambda (def acc) (append (convert-def def) acc))
-						  '()
-						  (ProgramDefs-def* p^))))))
-
+				   (for/foldr ([acc '()])
+					 ([def (ProgramDefs-def* p^)])
+					 (let ([def^ (match def
+								   [(? Def?) (convert-def def)]
+								   [(? StructDef?) (convert-struct def)])])
+					   (append def^ acc)))))))
   
 ; R5 -> R5
 (define (limit-functions p)
@@ -384,24 +415,23 @@
 
 
 (define (expose-allocation p)
-  ;(match-let ([(ProgramDefs info defs) p])
-;	(define struct-fields (dict-ref info 'struct-fields)) ;;write in type-check-Lstruct
+  (define struct-info (for/hash ([d (ProgramDefs-def* p)] #:when (StructDef? d))
+						(values (StructDef-name d) (list->vector (StructDef-field* d)))))
 
-  (define (allocate-tuple es bytes alloc-expr)
+  (define (allocate-tuple es bytes alloc-expr assign-func)
 	(let* ([var-vec (gensym 'alloc)]
-		   [es^ (let all-assign ([idx 0] [es* es])
-				  (if (null? es*)
-					'()
-					(cons (Prim 'vector-set! `(,(Var var-vec) ,(Int idx) ,(car es*)))
-						  (all-assign (+ idx 1) (cdr es*)))))]
+		   [es^ (for/fold ([acc '()])
+				  ([e es]
+				   [i (in-naturals)])
+				  (cons (assign-func (Var var-vec) i e) acc))]
 		   [assign-body (Let var-vec alloc-expr (Begin es^ (Var var-vec)))]
 		   [gc-check 
 			 (If (Prim '< 
-						  (list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Int bytes)))
-								(GlobalValue 'fromspace_end)))
-					(Void)
-					(Collect (Int bytes)))])
-								  
+					   (list (Prim '+ `(,(GlobalValue 'free_ptr) ,(Int bytes)))
+							 (GlobalValue 'fromspace_end)))
+				 (Void)
+				 (Collect (Int bytes)))])
+
 	  (Begin (list gc-check) assign-body)))
 
   (define (allocate-arr len-expr val-expr ts)
@@ -411,9 +441,9 @@
 		   [idx-var (gensym 'arr-init-idx)]
 		   [len-var (gensym 'arr-init-len)]
 		   [usize (match ts
-				  ['(Vectorof Integer) 8]
-				  [`(Vectorof ,_) 8] ;pointer size
-				  )]
+					['(Vectorof Integer) 8]
+					[`(Vectorof ,_) 8] ;pointer size
+					)]
 		   [bytes-expr (Prim '+ (list (Int 8)
 									  (Prim '* `(,(Int usize) ,(Var len-var)))))]
 		   [gc-check
@@ -443,19 +473,24 @@
 			(lambda (t)
 			  (match t
 				[`(Vector ,ts ...) (+ 8 (* 8 (length ts)))] ;;fields are basic type(Integer=8) or pointers;
-				))])
+				))]
+		  [assign-vector-func (lambda (dst idx e) (Prim 'vector-set! `(,dst ,(Int idx) ,e)))])
 	  (match expr
 		[(HasType (Prim 'vector es) ts) 
 		 (let ([bytes (calc-bytes-needed ts)])
-		   (allocate-tuple (map expose-allocation-expr es) bytes (Allocate bytes ts)))]
+		   (allocate-tuple (map expose-allocation-expr es) bytes (Allocate bytes ts) assign-vector-func))]
 		[(HasType (Closure arity es) ts)
 		 (let ([bytes (calc-bytes-needed ts)])
-		   (allocate-tuple (map expose-allocation-expr es) bytes (AllocateClosure bytes ts arity)))]
+		   (allocate-tuple (map expose-allocation-expr es) bytes (AllocateClosure bytes ts arity) assign-vector-func))]
 		[(HasType (Prim 'make-vector `(,len ,val)) ts) 
 		 (allocate-arr len (expose-allocation-expr val) ts)]
-		[(HasType (Apply (Var ctor) es) ts)
-		 (let ([bytes (calc-bytes-needed ts)])
-		   (allocate-tuple (map expose-allocation-expr es) bytes (Allocate bytes ts)))]
+		[(HasType (StructCtor name es) ts)
+		 (let* ([bytes (calc-bytes-needed ts)]
+				[fds (hash-ref struct-info name)]
+				[assign-func 
+				  (lambda (dst i e) 
+					(StructSetter name (car (vector-ref fds i)) i dst e))])
+		   (allocate-tuple (map expose-allocation-expr es) bytes (Allocate bytes name) assign-func))] ;;retain as struct type instead of vector
 		[else (fmap-expr expose-allocation-expr expr)])))
 
   (define (unwarp-HasType expr)
@@ -463,9 +498,7 @@
 	  [(HasType e t) (unwarp-HasType e)]
 	  [else (fmap-expr unwarp-HasType expr)]))
 
-  (match p
-	[(Program info e) (Program info (expose-allocation-expr e))]
-	[(? ProgramDefs?) (map-prog-fun-def-body (compose unwarp-HasType expose-allocation-expr) p)]))
+  (map-prog-fun-def-body (compose unwarp-HasType expose-allocation-expr) p))
 																				  
 
 			
@@ -485,12 +518,18 @@
 		[(Apply f args) 
 		 (nested-let (cons f args) '() (lambda (acc) 
 										 (let ([r-acc (reverse acc)])
-										   (Apply (car r-acc) (cdr r-acc)))))]))
+										   (Apply (car r-acc) (cdr r-acc)))))]
+		[(StructGetter name field idx stct) 
+		 (nested-let (list stct) '() (lambda (acc) (StructGetter name field idx (car acc))))]
+		[(StructSetter name field idx stct e)
+		 (nested-let (list e stct) '() (lambda (acc) (StructSetter name field idx (car acc) (last acc))))]
+		))
 
   (define (rco-expr expr)
 	(match expr
 		[(? Prim?) (rco-atm expr)]
 		[(? Apply?) (rco-atm expr)] 
+		[(or (? StructGetter?) (? StructSetter?)) (rco-atm expr)]
 		[else (fmap-expr rco-expr expr)]))
 
   (match p
@@ -530,7 +569,7 @@
 		  [(Begin es body) (foldr explicate-effect (explicate-assign var body acc) es)]
 		  [(WhileLoop cnd body) (explicate-effect expr (explicate-assign var (Void) acc))]
 		  [(GetBang v) (Seq (Assign (Var var) (Var v)) acc)]
-		  [other (Seq (Assign (Var var) expr) acc)]))
+		  [else (Seq (Assign (Var var) expr) acc)]))
 
 	  (define (explicate-pred pred lz-thn lz-els)
 		(match pred
@@ -538,9 +577,6 @@
 		  [(Bool #f)  (force lz-els)]
 		  [(Var b) (IfStmt (Prim 'eq? `(,pred ,(Bool #t))) (force lz-thn) (force lz-els))]
 		  [(GetBang e) (explicate-pred (Var e) lz-thn lz-els)]
-		  [(Apply f args) 
-		   (let ([v (gensym 'auto-if-call)]) 
-			 (explicate-assign v (Call f args) (explicate-pred (Var v) lz-thn lz-els)))]
 		  [(Prim (or 'eq? '< '<= '> '>=) rands) (IfStmt pred (force lz-thn) (force lz-els))]
 		  [(Prim 'not `(,pred*)) (explicate-pred pred* lz-els lz-thn)]
 		  [(Let v e body) (explicate-assign v e (explicate-pred body lz-thn lz-els))]
@@ -548,7 +584,10 @@
 		  [(If pred* thn* els*) 
 		   (explicate-pred pred* 
 						   (lz-add-CFG (explicate-pred thn* lz-thn lz-els)) 
-						   (lz-add-CFG (explicate-pred els* lz-thn lz-els)))]))
+						   (lz-add-CFG (explicate-pred els* lz-thn lz-els)))]
+		  [else
+		   (let ([v (gensym 'if-tmp)]) 
+			 (explicate-assign v pred (explicate-pred (Var v) lz-thn lz-els)))]))
 
 	  (define (explicate-effect expr acc)
 		(match expr
@@ -566,7 +605,10 @@
 			 (explicate-pred pred 
 							 (lz-add-CFG (explicate-effect thn acc^)) 
 							 (lz-add-CFG (explicate-effect els acc^))))]
-		  [(or (Prim (or 'vector-set! 'vectorof-set!) _) (Prim 'read '()) (? Collect?)) ;;side effect primitives(see utilities.rkt stmt?)
+		  [(or (Prim (or 'vector-set! 'vectorof-set!) _) 
+			   (? StructSetter?)
+			   (Prim 'read '()) 
+			   (? Collect?)) ;;side effect primitives(see utilities.rkt stmt?)
 		   (Seq expr acc)]
 		  [(Apply f args) (Seq (Call f args) acc)]
 		  [_ acc];;can ommit pure expr
@@ -584,50 +626,55 @@
 												(lz-add-CFG (Return (Void))))]
 		  [(SetBang v e) (explicate-assign v e (Return (Void)))]
 		  [(GetBang e) (Return (Var e))]
-		  [other (Return expr)]))
+		  [_ (Return expr)]))
 
 	  (begin (add-CFG (explicate-tail expr-body) (symbol->string start-label)) 
 			 CFG)))
 
-	  (match p
-			 ;[(Program info e) (CProgram info (explicate-control-expr e 'start))]
-			 [(ProgramDefs info defs) 
-			  (ProgramDefs info (for/list ([def (in-list defs)])
-										  (match-let ([(Def fn ps rt info body) def])
-													 (Def fn ps rt info (explicate-control-expr body (fn-start-label fn))))))]))
+  (map-prog-fun-def (lambda (def)
+					  (match-let ([(Def fn ps rt info body) def])
+						(Def fn ps rt info (explicate-control-expr body (fn-start-label fn)))))
+					p))
 
        
+(define (constant? e)
+  (or (Int? e) (Bool? e)))
+
+(define (to-X86-val e)
+  (match e
+	[(Int n) (Imm n)]
+	[(Bool b) (Imm (if b 1 0))]
+	[(? number?) (Imm e)]
+	[else e]))
+
+(define (get-const-val r2)
+  (match r2
+	[(Bool b) b]
+	[(Int n) n]))
+
+(define (push-args args)
+  (for/list ([arg args]
+			 [r arg-registers])
+	(Instr 'movq (list (to-X86-val arg) (Reg r)))))
+
+(define (cmpop->flag op)
+  (match op
+	['eq?  (cons equal? 'e)]
+	['< (cons < 'l)]
+	['<= (cons <= 'le)]
+	['> (cons > 'g)]
+	['>= (cons >= 'ge)]))
+
+(define (pointer-type? t)
+  (match t
+	[(or 'Integer 'Boolean) #f]
+	[_ #t]))
 
 ;; select-instructions : C0 -> pseudo-x86
 (define (select-instructions p)
-  (define (constant? e)
-	(or (Int? e) (Bool? e)))
 
-  (define (to-X86-val e)
-	(match e
-	  [(Int n) (Imm n)]
-	  [(Bool b) (Imm (if b 1 0))]
-	  [(? number?) (Imm e)]
-	  [else e]))
-
-  (define (get-const-val r2)
-	(match r2
-	  [(Bool b) b]
-	  [(Int n) n]))
-
-  (define (push-args args)
-	(for/list ([arg args]
-			   [r arg-registers])
-	  (Instr 'movq (list (to-X86-val arg) (Reg r)))))
-
-  (define (cmpop->flag op)
-	(match op
-	  ['eq?  (cons equal? 'e)]
-	  ['< (cons < 'l)]
-	  ['<= (cons <= 'le)]
-	  ['> (cons > 'g)]
-	  ['>= (cons >= 'ge)]))
-
+  (define struct-type-info (for/hash ([d (ProgramDefs-def* p)] #:when (StructDef? d))
+							 (values (StructDef-name d) (map last (StructDef-field* d)))))
 
   (define (trans-assign dst expr)
 	(match expr
@@ -684,20 +731,18 @@
 			   ,(Instr 'movq `(,(Reg 'rax) ,dst)))])]
 
 
-	  [(Prim (or 'vector-ref 'vectorof-ref) `(,v ,i))
-	   (let ([mem (cond
-					[(Int? i) (Deref 'r11 (* 8 (+ (Int-value i) 1)))]
+	  [(or (Prim (or 'vector-ref 'vectorof-ref) `(,v ,i))
+		   (StructGetter _ _ i v))
+	   (let ([mem (match i
+					[(Int idx) (Deref 'r11 (* 8 (+ idx 1)))]
+					[(? number?) (Deref 'r11 (* 8 (+ i 1)))]
 					[else (DerefEx (Reg 'r11) i 8 8)])])
 		 (list (Instr 'movq `(,v ,(Reg 'r11)))
 			   (Instr 'movq `(,mem ,dst))))]
-	  [(Prim (or 'vector-set! 'vectorof-set!) `(,v ,i ,arg))
-	   (let ([mem (cond
-					[(Int? i) (Deref 'r11 (* 8 (+ (Int-value i) 1)))]
-					[else (DerefEx (Reg 'r11) i 8 8)])])
-		 (list (Instr 'movq `(,v ,(Reg 'r11)))
-			   (Instr 'movq `(,(to-X86-val arg) ,mem))
-			   (Instr 'movq `(,(Imm 0) ,dst))
-			   ))]
+	  [(or (Prim (or 'vector-set! 'vectorof-set!) _) 
+		   (? StructSetter?))
+	   (trans-effect expr)]
+
 	  [(Prim 'vectorof-length `(,arr))
 	   `(,@(push-args (list arr))
 		  ,(Callq 'vectorof_length 1)
@@ -712,14 +757,16 @@
 					,(Instr 'movzbq (list (ByteReg 'al) dst)))]))]
 
 	  [(or (Allocate bytes ts) (AllocateClosure bytes ts _))
-	   (let* ([mask (let pointer-mask ([ts* (cdr ts)])
-					  (cond
-						[(null? ts*) 0]
-						[else (bitwise-ior (arithmetic-shift (pointer-mask (cdr ts*)) 1) 
-										   (match (car ts*)
-											 [`(Vector ,t ...) 1]
-											 [else 0]))]))]
-			  [len (length (cdr ts))]
+	   (let* ([calc-mask (lambda (ts) 
+						   (for/foldr ([bits 0])
+									  ([t ts])
+									  (bitwise-ior (if (pointer-type? t) 1 0)
+												   (arithmetic-shift bits 1))))]
+			  [elmt-ts (match ts 
+						 [`(Vector ,ts ...) ts]
+						 [stct (hash-ref struct-type-info stct)])]
+			  [mask (calc-mask elmt-ts)]
+			  [len (length elmt-ts)]
 			  [<< arithmetic-shift]
 			  [|| bitwise-ior]
 			  [header ((mask . << . 7) . || . (len . << . 1))])
@@ -728,9 +775,7 @@
 			   (Instr 'movq `(,(Imm header) ,(Deref 'r11 0)))
 			   (Instr 'movq `(,(Reg 'r11) ,dst))))]
 	  [(AllocateHom len bytes ts)
-	   (let* ([pointer? (match ts
-						  ['(Vectorof Integer) 0]
-						  [else 1])])
+	   (let* ([pointer? (match ts [`(Vectorof ,t) (if (pointer-type? t) 1 0)])])
 		 `(,@(push-args (list len bytes (Int pointer?)))
 			,(Callq 'allocate_arr 3)
 			,(Instr 'movq `(,(Reg 'rax) ,dst))))]
@@ -740,13 +785,14 @@
 			 (Instr 'movq `(,(to-X86-val bytes) ,(Reg 'rsi)))
 			 (Callq 'collect 2))]))
 
-  (define (trans-seq stmt)
 	(define (trans-effect expr)
 	  (match expr
 		[(Prim 'read '()) `(,(Callq 'read_int 0))]
-		[(Prim (or 'vector-set! 'vectorof-set!) `(,v ,i ,arg))
-		 (let ([mem (cond
-					  [(Int? i) (Deref 'r11 (* 8 (+ (Int-value i) 1)))]
+		[(or (Prim (or 'vector-set! 'vectorof-set!) `(,v ,i ,arg))
+			 (StructSetter _ _ i v arg))
+		 (let ([mem (match i
+					  [(Int idx) (Deref 'r11 (* 8 (+ idx 1)))]
+					  [(? number?) (Deref 'r11 (* 8 (+ i 1)))]
 					  [else (DerefEx (Reg 'r11) i 8 8)])])
 		   `(,(Instr 'movq `(,v ,(Reg 'r11)))
 			  ,(Instr 'movq `(,(to-X86-val arg) ,mem))))]
@@ -756,6 +802,8 @@
 		 `(,(Instr 'movq `(,(Reg rootstack-reg) ,(Reg 'rdi)))
 			,(Instr 'movq `(,(to-X86-val bytes) ,(Reg 'rsi)))
 			,(Callq 'collect 2))]))
+
+  (define (trans-seq stmt)
 	(match stmt
 	  [(Assign dst expr) (trans-assign dst expr)]
 	  [else (trans-effect stmt)]))
@@ -802,8 +850,7 @@
 						  (Block '() (trans-tail stmts))))))])
 		(Def fn ps rt info^ CFG^))))
 
-  (match (send (new type-check-Clambda-class) type-check-program p)
-	[(ProgramDefs info defs) (ProgramDefs info (map trans-def defs))]))
+  (map-prog-fun-def trans-def (send (new type-check-Clambda-class) type-check-program p)))
 
 
 (define (remove-jumps p)
@@ -1079,7 +1126,7 @@
 									 (lambda (x)
 									   (for ([d w] #:unless (equal? x d))
 										 (add-edge! g x d)))))]))
-			g) ;;return interference graph
+			  g) ;;return interference graph
 			) ;;recur end
 		  (recur start)))
 	  (from-label start)))
@@ -1087,10 +1134,9 @@
   (define (build-from-def def)
 	(match-let ([(Def fn ps rt info CFG) def])
 	  (let ([info^ (cons `(conflicts . ,(build-from info CFG (fn-start-label fn))) info)])
-			   (Def fn ps rt info^ CFG))))
-  (match p
-		 ;[(X86Program info CFG) (X86Program (cons `(conflicts . ,(build-from info CFG 'start)) info) CFG)]
-		 [(? ProgramDefs?) (map-prog-fun-def build-from-def p)]))
+		(Def fn ps rt info^ CFG))))
+
+  (map-prog-fun-def build-from-def p))
 
 
 (require "priority_queue.rkt")
@@ -1208,6 +1254,10 @@
 	(match instr
 		   [(Instr 'movq `(,arg ,arg)) '()] ;;del
 
+		   [(Instr 'movzbq `(,arg1 ,(and arg2 (not (? Reg?)))))
+			`(,(Instr 'movzbq `(,arg1 ,(Reg 'rax)))
+			   ,(Instr 'movq `(,(Reg 'rax) ,arg2)))]
+
 		   ;;patch DerefEx TODO optimize
 		   [(Instr 'movq `(,(DerefEx base (and var (? Deref?)) stride offset) 
 							,arg2))
@@ -1263,9 +1313,7 @@
 					   '()
 					   stmts))))))
 
-  (match p
-		 ;[(X86Program info CFG) (X86Program info (patch-CFG CFG))]
-		 [(? ProgramDefs?) (map-prog-fun-def-body patch-CFG p)]))
+  (map-prog-fun-def-body patch-CFG p))
 
 
 
@@ -1357,5 +1405,5 @@
 		 [(X86Program info CFG) (print-CFG 'main info CFG)]
 		 [(ProgramDefs info defs)
 		  (string-join
-			(for/list ([def defs]) (print-CFG (Def-name def) (Def-info def) (Def-body def)))
+			(for/list ([def defs] #:when (Def? def)) (print-CFG (Def-name def) (Def-info def) (Def-body def)))
 			"\n\n")]))

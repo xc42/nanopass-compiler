@@ -135,7 +135,7 @@ Changelog:
          (contract-out [struct Imm ((value integer?))]) ;; allow 64-bit
          (contract-out [struct Reg ((name symbol?))])
          (contract-out [struct Deref ((reg symbol?) (offset fixnum?))])
-         (contract-out [struct DerefEx ((base Reg?) (var (or/c Var? Reg? Deref?)) (stride fixnum?) (offset fixnum?))])
+         (contract-out [struct DerefEx ((base Reg?) (var (or/c Var? Reg?)) (stride fixnum?) (offset fixnum?))])
          (contract-out [struct Instr ((name symbol?) (arg* arg-list?))])
          (contract-out [struct Callq ((target symbol?) (arity fixnum?))])
          (contract-out [struct IndirectCallq ((target arg?) (arity fixnum?))])
