@@ -94,7 +94,17 @@ Changelog:
          (contract-out [struct StructCtor ((name symbol?) (es* exp-list?))])
 		 (contract-out [struct StructGetter ((name symbol?) (field symbol?) (idx nonnegative-integer?) (stct exp?))])
 		 (contract-out [struct StructSetter ((name symbol?) (field symbol?) (idx nonnegative-integer?) (stct exp?) (e exp?))])
-		 
+		 (contract-out [struct ADTDef ((name symbol?) (variants (listof VariantDef?)))])
+		 (contract-out [struct IsType ((e exp?) (ty symbol?))])
+
+		 (contract-out [struct Patt-Num ((num number?))])
+		 (contract-out [struct Patt-Bool ((bool boolean?))])
+		 (contract-out [struct Patt-Var ((var symbol?))])
+		 (struct-out Patt-Wildcard)
+		 (contract-out [struct Patt-Ctor ((name symbol?) (patt* (listof Pattern?)))])
+		 (contract-out [struct MatchExp ((e exp?) (clause* (non-empty-listof (cons/c Pattern? exp?))))])
+		 (struct-out MatchError)
+
          (contract-out [struct Apply ((fun exp?) (arg* exp-list?))])
          (contract-out [struct Def ((name symbol?) (param* param-list?) (rty type?) (info any?)
                                                    (body any?))])
@@ -135,7 +145,7 @@ Changelog:
          (contract-out [struct Imm ((value integer?))]) ;; allow 64-bit
          (contract-out [struct Reg ((name symbol?))])
          (contract-out [struct Deref ((reg symbol?) (offset fixnum?))])
-         (contract-out [struct DerefEx ((base Reg?) (var (or/c Var? Reg?)) (stride fixnum?) (offset fixnum?))])
+         (contract-out [struct DerefEx ((base Reg?) (var (or/c Var? Reg? Deref?)) (stride fixnum?) (offset fixnum?))])
          (contract-out [struct Instr ((name symbol?) (arg* arg-list?))])
          (contract-out [struct Callq ((target symbol?) (arity fixnum?))])
          (contract-out [struct IndirectCallq ((target arg?) (arity fixnum?))])
@@ -860,6 +870,19 @@ Changelog:
 						(lambda (obj) 'StructSetter)
 						(lambda (obj) (struct->list obj))))]) 
 
+(struct ADTDef (name variants) #:transparent)
+(struct VariantDef StructDef () #:transparent)
+(struct IsType (e ty) #:transparent) ;test sum type at runtime
+
+(struct Pattern ())
+(struct Patt-Wildcard Pattern () #:transparent)
+(struct Patt-Num Pattern (num) #:transparent)
+(struct Patt-Bool Pattern (bool) #:transparent)
+(struct Patt-Var Pattern (var) #:transparent)
+(struct Patt-Ctor Pattern (name patt*) #:transparent)
+
+(struct MatchExp (e clause*) #:transparent)
+(struct MatchError () #:transparent)
 
 (struct Lambda (param* rty body) #:transparent #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
@@ -1727,6 +1750,9 @@ Changelog:
 				  [b body])
 				 (If (parse-exp p) (parse-exp b) acc))]
 
+	[`(match ,exp [,clause* ,thn*] ...)
+	  (MatchExp exp (for/list ([c clause*] [t thn*]) 
+					  (cons (parse-exp c) (parse-exp t))))]
     [`(lambda: ,ps : ,rt ,body)
      (Lambda ps rt (parse-exp body))]
     [`(lambda: ,ps ,body)
@@ -1762,7 +1788,9 @@ Changelog:
     [`(define (,f ,xs ...) ,body) ;; dynamically typed definition
      (Def f xs 'Any '() (parse-exp body))]
     [`(struct ,name ,fields #:mutable)
-     (StructDef name fields)]    
+     (StructDef name fields)]
+	[`(data ,name [(,vars ,fields) ...])
+	  (ADTDef name (map StructDef vars fields))]
     [`(: ,name ,type)
      (Decl name type)]
     ))

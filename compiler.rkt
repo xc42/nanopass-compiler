@@ -137,6 +137,61 @@
 	  (map-prog-fun-def-body reveal-functions* p))))
 
 
+(define (compile-pattern-matching e clauses)
+  (define (type-equal? t1 t2) #t)
+  (define (structual-type? t) #t)
+  (define (is-variant var-ty sum-ty) #t)
+
+  (define (all-fields e ty) 42)
+  (define (all-field-ts t) '())
+
+  (define (check-pattern-type p pred)
+	(match p
+	  [(or Patt-Wildcard? Patt-Var?) #t]
+	  [(? Patt-Num?) (pred 'Integer)]
+	  [(? Patt-Bool?) (pred 'Boolean)]
+	  [(Patt-Ctor name _) (pred name)]))
+
+  (define (filter-pattern es ts clause-rows) #t)
+
+  (define (general-match es ts clause-rows)
+	(cond
+	  [(null? es) (MatchError)]
+	  [else
+	  (match (caar clause-rows)
+		[(Patt-Ctor name patt*)
+		 (let ([t (car ts)]
+			   [e (car es)])
+		   (cond
+			 [(eq? t name)
+			  (general-match 
+				(append (all-fields e) (cdr es))
+				(append (all-field-ts t) (cdr ts))
+				(for/list ([row clause-rows])
+				  (let ([ps (car row)]
+						[thn (cdr row)])
+					(cons (append (Patt-Ctor-patt* (car ps)) (cdr ps))
+						  thn))))]
+			 [(is-variant name t)
+			  
+		 
+
+						
+
+  (define (try-match-pattern e patt thn els)
+	(match patt
+	  [(? Patt-Wildcard?) thn]
+	  [(Patt-Var v) (Let v e0 thn)]
+	  [(Patt-Num num) (If (Prim 'eq? `(,e ,(Int num))) thn els)]
+	  [(Patt-Bool b)  (If e thn els)]
+	  [(Patt-Ctor name patt*) 
+	   (If (IsType e name)
+		   (call-with-values (lambda () (expand* (all-fields e) (map cons patt* thn)))
+							 transform*)
+		   els)]))
+
+
+
 (define (free-variable expr)
   (let ([join-proc (lambda (e fvs) (set-union fvs (free-variable e)))])
 	(match expr
