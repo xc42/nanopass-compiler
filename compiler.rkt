@@ -540,21 +540,19 @@
 (define (explicate-control p)
 
   (define (explicate-control-expr expr-body start-label)
-	(let* ([CFG (list)]
-		   [add-CFG
-			 (lambda (block [label-str ""])
-			   (if (Goto? block)
-				 block
-				 (let ([label (cond
-								[(string? label-str) (if (equal? label-str "") 
-													   (gensym 'block) 
-													   (string->symbol label-str))]
-								[else label-str])])
-				   (set! CFG (cons (cons label block) CFG))
-				   (Goto label))))]
-		   [lz-add-CFG
-			 (lambda (block [label-str ""])
-			   (delay (add-CFG block label-str)))])
+	(define CFG (list))
+
+	(define (add-CFG block [label-str ""])
+	  (let ([label (if (string? label-str)
+					 (if (equal? label-str "") 
+					   (gensym 'block) 
+					   (string->symbol label-str))
+					 label-str)])
+		(set! CFG (cons (cons label block) CFG))
+		(Goto label)))
+
+	(define (lz-add-CFG block [label-str ""])
+	  (delay (add-CFG block label-str)))
 
 	  (define (explicate-assign var expr acc)
 		(match expr
@@ -596,9 +594,9 @@
 		  [(WhileLoop cnd body)
 		   (let* ([loop (gensym 'loop)]
 				  [block (explicate-pred cnd (lz-add-CFG (explicate-effect body (Goto loop))) (lz-add-CFG acc))])
-			 (begin
-			   (add-CFG block loop)
-			   block))]
+			 ;(begin
+			   (add-CFG block loop))]
+			   ;block))]
 		  [(Let v e body) (explicate-assign v e (explicate-effect body acc))]
 		  [(If pred thn els)
 		   (let ([acc^ (add-CFG acc)])
@@ -621,15 +619,13 @@
 		  [(If pred thn els) (explicate-pred pred (lz-add-CFG (explicate-tail thn)) (lz-add-CFG (explicate-tail els)))]
 		  [(Apply f args) (TailCall f args)]
 		  [(Begin es body) (foldr explicate-effect (explicate-tail body) es)]
-		  [(WhileLoop cnd body) (explicate-pred cnd 
-												(lz-add-CFG (explicate-effect body (Goto (gensym 'loop))))
-												(lz-add-CFG (Return (Void))))]
+		  [(? WhileLoop?) (explicate-effect expr (Return (Void)))]
 		  [(SetBang v e) (explicate-assign v e (Return (Void)))]
 		  [(GetBang e) (Return (Var e))]
 		  [_ (Return expr)]))
 
 	  (begin (add-CFG (explicate-tail expr-body) (symbol->string start-label)) 
-			 CFG)))
+			 CFG)) ;;explicate-control-expr 
 
   (map-prog-fun-def (lambda (def)
 					  (match-let ([(Def fn ps rt info body) def])
@@ -769,7 +765,7 @@
 			  [len (length elmt-ts)]
 			  [<< arithmetic-shift]
 			  [|| bitwise-ior]
-			  [header ((mask . << . 7) . || . (len . << . 1))])
+			  [header ((mask . << . 7) . || . ((len . << . 1) . || . 1))])
 		 (list (Instr 'movq `(,(Global 'free_ptr) ,(Reg 'r11)))
 			   (Instr 'addq `(,(Imm bytes) ,(Global 'free_ptr)))
 			   (Instr 'movq `(,(Imm header) ,(Deref 'r11 0)))
