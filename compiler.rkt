@@ -1184,11 +1184,11 @@
 			 (begin (set-box! spilled-bx spilled) (set-box! rootst-spilled-bx rootst-spilled) '())
 			 (let* ([var (Var (caar loc-ts))]
 					[ts (cdar loc-ts)]
-					[is-vec-type  (and (pair? ts) (eq? (car ts) 'Vector))])
+					[is-heap-obj (match ts [(or `(Vector ,_ ...) `(Vectorof ,_ ...)) #t] [_ #f])])
 			   (if (hash-has-key? color-map var)
 				 (let ([reg-idx (hash-ref color-map var)])
 				   (if (or (< reg-idx 0) (>= reg-idx limit-reg))
-					 (if  is-vec-type
+					 (if  is-heap-obj
 					   (cons (cons var (Deref rootstack-reg (* -8 (+ 1 rootst-spilled)))) (scan-var (cdr loc-ts) spilled (+ rootst-spilled 1))) ; spill to rootstack for gc
 					   (cons (cons var (Deref 'rbp (* -8 (+ 1 spilled)))) (scan-var (cdr loc-ts) (+ spilled 1) rootst-spilled)))
 					 (cons (cons var (Reg (vector-ref general-registers reg-idx))) (scan-var (cdr loc-ts) spilled rootst-spilled))))

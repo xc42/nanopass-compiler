@@ -139,5 +139,8 @@
 ;(compiler-tests "r8" type-check-Llambda r8-passes "r8_test" (tests-for "r8"))
 ;(interp-tests "arr" type-check-Llambda r8-passes interp-Llambda "arr_test" (tests-for "arr_test"))
 ;(compiler-tests "arr" type-check-Llambda r8-passes "arr_test" (tests-for "arr"))
-(interp-tests "struct" type-check-Llambda r8-passes interp-Llambda "struct_test" (tests-for "struct_test"))
-(compiler-tests "struct" type-check-Llambda r8-passes "struct_test" (tests-for "struct"))
+;(interp-tests "struct" type-check-Llambda r8-passes interp-Llambda "struct_test" (tests-for "struct_test"))
+;(compiler-tests "struct" type-check-Llambda r8-passes "struct_test" (tests-for "struct"))
+(interp-tests "gc" type-check-Llambda r8-passes interp-Llambda "gc_test" (tests-for "gc_test"))
+(compiler-tests "gc" type-check-Llambda r8-passes "gc_test" (tests-for "gc"))
+

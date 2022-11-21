@@ -51,3 +51,7 @@ void print_any(int64_t any);
 int64_t* allocate_arr(int64_t len, size_t bytes, int is_ptr);
 int64_t vectorof_length(int64_t* arr);
 }
+
+enum class ObjType { Tuple, Array };
+ObjType obj_type(int64_t tag) { return tag >> 62 & 1? ObjType::Array: ObjType::Tuple; }
+

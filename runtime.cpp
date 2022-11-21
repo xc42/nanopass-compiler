@@ -126,7 +126,7 @@ void initialize(uint64_t rootstack_size, uint64_t heap_size)
 
 void collect(int64_t** rootstack_ptr, uint64_t bytes_requested)
 {
-#if 0
+#if 1
   printf("collecting, need %ld\n", bytes_requested);
   print_heap(rootstack_ptr);
 #endif
@@ -152,7 +152,7 @@ void collect(int64_t** rootstack_ptr, uint64_t bytes_requested)
 
   // 3. Check if collection freed enough space in order to allocate
   if (sizeof(int64_t) * (fromspace_end - free_ptr) < bytes_requested){
-    //printf("resizing the heap\n");
+	  std::cerr << "resizing the heap" << std::endl;
     /*
        If there is not enough room left for the bytes_requested,
        allocate larger tospace and fromspace.
@@ -220,7 +220,8 @@ void collect(int64_t** rootstack_ptr, uint64_t bytes_requested)
 
   assert(free_ptr < fromspace_end);
   assert(free_ptr >= fromspace_begin);
-#ifndef NDEBUG
+
+#if 0
   // All pointers in the rootstack point to fromspace
   for (unsigned long i = 0; rootstack_begin + i < rootstack_ptr; i++){
     int64_t* root = rootstack_begin[i];
@@ -254,9 +255,6 @@ void collect(int64_t** rootstack_ptr, uint64_t bytes_requested)
       }
     }
   }
-#endif
-
-#if 0
   printf("finished collecting\n");
   print_heap(rootstack_ptr);
   printf("---------------------------------------\n");
@@ -268,6 +266,10 @@ void collect(int64_t** rootstack_ptr, uint64_t bytes_requested)
 // the new address of the data.
 // There is a stub and explaination for copy_vector below.
 static void copy_vector(int64_t** vector_ptr_loc);
+static void copy_array(int64_t** arr_ptr_loc);
+static void copy_object(int64_t** vector_ptr_loc);
+static int64_t* deep_copy_vector(int64_t* vector_ptr);
+static int64_t* deep_copy_array(int64_t* arr_ptr);
 
 /*
   The cheney algorithm takes a pointer to the top of the rootstack.
@@ -304,20 +306,19 @@ static void copy_vector(int64_t** vector_ptr_loc);
 
 void cheney(int64_t** rootstack_ptr)
 {
-  // printf("cheney: starting copy, rootstack=%p\n", rootstack_ptr);
+  printf("cheney: starting copy, rootstack begin=%p, cur=%p\n", rootstack_begin, rootstack_ptr);
   int64_t* scan_ptr = tospace_begin;
   free_ptr = tospace_begin;
 
   /* traverse the root set to create the initial queue */
-  for (int64_t** root_loc = rootstack_begin;
-       root_loc != rootstack_ptr;
-       ++root_loc) {
+  for (int64_t** root_loc = rootstack_begin; root_loc != rootstack_ptr; ++root_loc) {
     /*
       We pass copy vector the pointer to the pointer to the vector.
       This is because we need to be able to rewrite the pointer after
       the object has been moved.
     */
-    copy_vector(root_loc);
+	assert(is_ptr(*root_loc));
+    copy_object(root_loc);
   }
 
   /*
@@ -326,54 +327,22 @@ void cheney(int64_t** rootstack_ptr)
      from space.
   */
   while (scan_ptr != free_ptr) {
-    /*
-       I inlined this to leave maniuplation of scan_ptr to a single
-       function. This can be accomplished by passing the location
-       of the pointer into helper, but let's not make reasoning
-       through the algorithm any harder.
-
-       The invarient of the outer loop is that scan_ptr is either
-       at the front of a vector, or == to free_ptr.
-    */
 
     // Since this tag is already in tospace we know that it isn't
     // a forwarding pointer.
     int64_t tag = *scan_ptr;
-
-    // the length of the vector is contained in bits [1,6]
-    int len = get_length(tag);
-
-    // Find the next vector or the next free_ptr;
-    // with is len + 1 away from the current;
-    int64_t* next_ptr = scan_ptr + len + 1;
-
-    // each bit low to high says if the next index is a ptr
-    int64_t isPointerBits = get_ptr_bitfield(tag);
-
-    // Advance the scan_ptr then check to
-    // see if we have arrived at the beginning of the next array.
-    scan_ptr += 1;
-    while(scan_ptr != next_ptr){
-      if ((isPointerBits & 1) == 1) {
-        // since the tag says that the scan ptr in question is a
-        // ptr* we known that scan_ptr currently points to a ptr*
-        // and must be a ptr** itself.
-        copy_vector((int64_t**)scan_ptr);
-      }
-      // Advance the tag so the next check is for the next scan ptr
-      isPointerBits = isPointerBits >> 1;
-      scan_ptr += 1;
-    }
+	switch(obj_type(tag))
+	{
+		case ObjType::Tuple:
+			scan_ptr = deep_copy_vector(scan_ptr);
+		case ObjType::Array:
+			scan_ptr = deep_copy_array(scan_ptr);
+	}
 
   }
 
-  /* swap the tospace and fromspace */
-  int64_t* tmp_begin = tospace_begin;
-  int64_t* tmp_end = tospace_end;
-  tospace_begin = fromspace_begin;
-  tospace_end = fromspace_end;
-  fromspace_begin = tmp_begin;
-  fromspace_end = tmp_end;
+  std::swap(tospace_begin, fromspace_begin);
+  std::swap(tospace_end, fromspace_end);
   //printf("cheney: finished copy\n");
 }
 
@@ -434,8 +403,7 @@ void copy_vector(int64_t** vector_ptr_loc)
   int64_t* old_vector_ptr = *vector_ptr_loc;
   int old_tag = any_tag((int64_t)old_vector_ptr);
 
-  if (! is_ptr(old_vector_ptr))
-    return;
+
   old_vector_ptr = to_ptr(old_vector_ptr);
 #if 0
   printf("copy_vector %ll\n", (int64_t)old_vector_ptr);
@@ -497,7 +465,72 @@ void copy_vector(int64_t** vector_ptr_loc)
   }
 }
 
+void copy_array(int64_t **arr_loc)
+{
+	int64_t* old_arr_ptr = *arr_loc;
+	int64_t tag = old_arr_ptr[0];
 
+	if(is_forwarding(tag)) {
+		*arr_loc = reinterpret_cast<int64_t*>(old_arr_ptr[0]);
+	} else {
+		int64_t len = vectorof_length(old_arr_ptr);
+		int64_t *new_arr_ptr = free_ptr;
+
+		std::copy(old_arr_ptr, old_arr_ptr + len + 1, new_arr_ptr);
+		free_ptr += len + 1;
+
+		old_arr_ptr[0] = reinterpret_cast<int64_t>(new_arr_ptr);
+		*arr_loc = new_arr_ptr;
+	}
+}
+
+int64_t* deep_copy_vector(int64_t* vector_ptr)
+{
+	int64_t tag = vector_ptr[0];
+
+    // the length of the vector is contained in bits [1,6]
+	int len = get_length(tag);
+
+    // each bit low to high says if the next index is a ptr
+    int64_t isPointerBits = get_ptr_bitfield(tag);
+
+	for(int i = 1; i <= len; ++i) {
+		if(isPointerBits & 1) {
+			copy_object(reinterpret_cast<int64_t**>(&vector_ptr[i]));
+		}
+		isPointerBits = isPointerBits >> 1;
+	}
+	return vector_ptr + len + 1;
+}
+
+int64_t* deep_copy_array(int64_t* arr_ptr)
+{
+	int64_t tag = arr_ptr[0];
+	int64_t len = vectorof_length(arr_ptr);
+
+	if(tag >> 1 & 1) { //array of pointer
+		for(int64_t i = 1; i <= len; ++i) {
+			copy_object(reinterpret_cast<int64_t**>(&arr_ptr[i]));
+		}
+	}
+	return arr_ptr + len + 1;
+}
+
+void copy_object(int64_t **obj_loc)
+{
+	int64_t *obj = *obj_loc;
+	
+	//62 bit indicate object type: 0 for tuple, 1 for array
+	switch(obj_type(obj[0]))
+	{
+		case ObjType::Tuple:
+			copy_vector(obj_loc);
+			break;
+		case ObjType::Array:
+			copy_array(obj_loc);
+			break;
+	}
+}
 
 // Read an integer from stdin
 int64_t read_int() {
@@ -587,7 +620,7 @@ void print_heap(int64_t** rootstack_ptr)
     if (is_ptr(*root_loc)) {
       print_vector(to_ptr(*root_loc));
     } else {
-      printf("%lld", (int64_t)*root_loc);
+      printf("%ld", (int64_t)*root_loc);
     }
     printf("\n");
   }
@@ -601,14 +634,14 @@ void print_vector(int64_t* vector_ptr)
   int64_t* scan_ptr = vector_ptr;
   int64_t* next_ptr = vector_ptr + len + 1;
 
-  printf("%lld=#(", (int64_t)vector_ptr);
+  printf("%ld=#(", (int64_t)vector_ptr);
   scan_ptr += 1;
   int64_t isPointerBits = get_ptr_bitfield(tag);
   while (scan_ptr != next_ptr) {
     if ((isPointerBits & 1) == 1 && is_ptr((int64_t*)*scan_ptr)) {
       print_vector(to_ptr((int64_t*)*scan_ptr));
     } else {
-      printf("%lld", (int64_t)*scan_ptr);
+      printf("%ld", (int64_t)*scan_ptr);
     }
     isPointerBits = isPointerBits >> 1;
     scan_ptr += 1;
@@ -677,7 +710,6 @@ int64_t* allocate_arr(int64_t len, size_t bytes, int is_ptr)
 {
 	auto head = free_ptr;
 	free_ptr += len + 1;
-	*head = len << 2;
-	*head |= (1LL << 62) | is_ptr << 1;
+	*head |= (1LL << 62) | len << 2 | is_ptr << 1 | 1;
 	return head;
 }

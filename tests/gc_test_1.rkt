@@ -12,6 +12,5 @@
 		   (set! n (- n 1)))))
 
 
-;(let ([run (iter alloc128 655536)])
-(let ([run (iter alloc128 10000)])
+(let ([run (iter alloc128 65)])
   0)
